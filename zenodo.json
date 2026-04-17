@@ -1,0 +1,53 @@
+{
+  "title": "Analysis pipeline for 'Gut Microbiome in Infancy Predicts Malaria Susceptibility'",
+  "description": "<p>R Markdown pipeline reproducing all figures, tables, and statistical results for the manuscript Dutton et al., 'Gut Microbiome in Infancy Predicts Malaria Susceptibility' (Frontiers in Microbiology, 2026).</p><p>Inputs are full-length 16S rRNA PacBio CCS reads (raw reads archived at NCBI SRA) processed through DADA2, packaged as a phyloseq object. The pipeline reproduces all main and supplemental figures, classifier analyses (k-NN with Boruta feature selection, 72-model grid search, repeated cross-validation, LOOCV, permutation testing, sensitivity covariate models), ANCOM-BC differential abundance (including bednet-adjusted sensitivity), DAR multi-method consensus, LEfSe, and SplinectomeR longitudinal analyses.</p><p>Exact package versions are pinned via renv.lock. Restore the environment with renv::restore() and knit Congo_Malaria_Rev1.Rmd.</p>",
+  "upload_type": "software",
+  "creators": [
+    {
+      "name": "Dutton, Christopher L.",
+      "affiliation": "University of Florida"
+    },
+    {
+      "name": "Follis, Madison",
+      "affiliation": "University of Florida"
+    },
+    {
+      "name": "Munaweera, Jenny",
+      "affiliation": "University of Florida"
+    },
+    {
+      "name": "Maisha, Felicien Masanga",
+      "affiliation": "HEAL Africa Hospital, Democratic Republic of Congo"
+    },
+    {
+      "name": "Mulligan, Connie J.",
+      "affiliation": "University of Florida"
+    },
+    {
+      "name": "Moore, Julie M.",
+      "affiliation": "University of Florida"
+    }
+  ],
+  "keywords": [
+    "microbiome",
+    "16S rRNA",
+    "malaria",
+    "infant gut microbiome",
+    "PacBio",
+    "DADA2",
+    "phyloseq",
+    "ANCOM-BC",
+    "machine learning classifier",
+    "reproducibility"
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "TO_BE_UPDATED_WITH_FRONTIERS_DOI",
+      "resource_type": "publication-article"
+    }
+  ],
+  "communities": []
+}

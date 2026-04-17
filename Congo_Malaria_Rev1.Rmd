@@ -1,0 +1,3811 @@
+---
+title: "Congo Malaria Rev1: DRC Infant Gut Microbiome and Malaria Susceptibility"
+author: "Christopher L. Dutton, Madison Follis, Jenny Munaweera, Felicien Masanga Maisha, Connie J. Mulligan, and Julie M. Moore"
+date: "Last compiled on `r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    toc_depth: 3
+    code_folding: hide
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.width = 10, fig.height = 7, dpi = 150,
+  out.width = "100%",
+  cache = FALSE
+)
+# NOTE: Global cache=TRUE was disabled because this Rmd loads many packages
+# (dar, randomForest, etc.) that mask phyloseq/ggplot2 functions. Cached
+# chunks don't re-execute library() calls, so masking can silently break
+# across cached vs fresh runs. Slow chunks (classifiers, permutations)
+# retain cache=TRUE individually via their chunk headers.
+```
+
+# Setup
+
+## Load all packages
+
+```{r load-packages, cache=FALSE}
+library(plyr)       # MUST load before dplyr
+library(phyloseq)
+library(microeco)
+library(file2meco)
+library(magrittr)
+library(dplyr)      # loaded after plyr to take precedence
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(cowplot)
+library(microbiome)
+library(ANCOMBC)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(reshape2)
+library(splinectomeR)
+library(vegan)
+library(caret)
+library(Boruta)
+library(randomForest)
+library(pwr)
+library(knitr)
+library(kableExtra)
+```
+
+## Load data (once)
+
+All analyses start from `psCombinedCongo_V5.rds`. We load it once here.
+
+```{r load-data, cache=FALSE}
+set.seed(11)
+
+combinedcongo <- readRDS("psCombinedCongo_V5.rds")
+cat(sprintf("Loaded phyloseq object: %d taxa x %d samples\n",
+            phyloseq::ntaxa(combinedcongo), phyloseq::nsamples(combinedcongo)))
+
+# Also load malaria risk scores
+risk_df <- read.csv("working_malaria_risk_score.csv", stringsAsFactors = FALSE)
+```
+
+## Define global colors and helper functions
+
+```{r helpers, cache=FALSE}
+# Output directory for saved figures
+dir.create("figures", showWarnings = FALSE)
+
+# Helper to save a ggplot to both PNG and PDF
+save_fig <- function(plot, name, width = 10, height = 7) {
+  ggsave(file.path("figures", paste0(name, ".png")), plot, width = width, height = height, dpi = 300)
+  ggsave(file.path("figures", paste0(name, ".pdf")), plot, width = width, height = height)
+  cat(sprintf("Saved: figures/%s.png and .pdf\n", name))
+}
+
+# Standard colors used throughout
+JulieRed    <- "#FF0000"
+JulieBlue   <- "#0000FF"
+color_vals  <- c(Never = JulieBlue, Yes = JulieRed)
+timecolors  <- c("6W" = "#F605FA", "3M" = "#05FAF6", "6M" = "#FF0000", "1Y" = "#0000FF")
+
+# Standard microeco cleanup function (used by nearly every analysis)
+make_clean_meco <- function(ps = combinedcongo) {
+  dataset <- phyloseq2meco(ps)
+  dataset$tidy_dataset()
+  dataset$tax_table %<>% base::subset(Kingdom %in% c("k__Archaea", "k__Bacteria"))
+  dataset$filter_pollution(taxa = c("mitochondria", "chloroplast"))
+  dataset$tidy_dataset()
+  return(dataset)
+}
+
+# Prepare a timepoint-specific dataset for malaria comparisons
+make_timepoint_meco <- function(time_point, ps = combinedcongo, 
+                                 group_col = "BeforeMalaria") {
+  dataset <- make_clean_meco(ps)
+  dataset$sample_table <- subset(dataset$sample_table, 
+                                  Time == time_point & Type == "sample")
+  if (group_col == "BeforeMalaria") {
+    dataset$sample_table$BeforeMalaria[is.na(dataset$sample_table$BeforeMalaria)] <- "Never"
+    dataset$sample_table <- subset(dataset$sample_table, 
+                                    BeforeMalaria %in% c("Yes", "Never"))
+  }
+  dataset$tidy_dataset()
+  return(dataset)
+}
+
+# Flip, split, merge for SplinectomeR
+flip_split_merge <- function(otus_in, metadata) {
+  row.names(otus_in) <- otus_in$Taxa
+  otus_in$Taxa <- NULL
+  otus_in <- data.frame(t(otus_in))
+  otus_in <- tibble::rownames_to_column(otus_in, var = "sampleID")
+  otus_meta <- merge(metadata, otus_in, by = "sampleID")
+  return(otus_meta)
+}
+
+# Samples to remove (replicates/mocks) for SplinectomeR analyses
+samples_to_remove <- c(
+  "G7_3MR", "G46_3MR", "G4_3MR", "G20_PT2R", "G19_6WR",
+  "G45_1Y_2", "G23_PT1B", "G7_PT1", "G20_PT2", "G20_MV1",
+  "G20_PT1", "G2_PT", "G19_MV3", "G17_3M", "G12_PT1", "G7_MV2"
+)
+```
+
+# Figure 2: Longitudinal Microbiome Development
+
+## Figure 2A: Top 10 species over time (SplinectomeR)
+
+```{r fig2a, fig.width=12, fig.height=7, fig.cap="Longitudinal SplinectomeR analysis of top 10 species."}
+# Faithful reproduction of Figure_2A.R
+# Key: filter Type == "sample" in phyloseq BEFORE converting to microeco
+set.seed(11)
+
+samples_2a <- phyloseq::subset_samples(combinedcongo, Type == "sample")
+dataset_2a <- phyloseq2meco(samples_2a)
+dataset_2a$tidy_dataset()
+dataset_2a$tax_table %<>% base::subset(Kingdom == "k__Archaea" | Kingdom == "k__Bacteria")
+dataset_2a$filter_pollution(taxa = c("mitochondria", "chloroplast"))
+dataset_2a$tidy_dataset()
+dataset_2a$cal_abund()
+
+otus <- dataset_2a$taxa_abund$Species
+taxa_sums <- rowSums(otus)
+top_10_names <- names(sort(taxa_sums, decreasing = TRUE))[1:10]
+otus_top10_t <- as.data.frame(t(otus[top_10_names, ]))
+otus_top10_t <- tibble::rownames_to_column(otus_top10_t, var = "sampleID")
+
+metadata_2a <- dataset_2a$sample_table
+colnames(metadata_2a)[colnames(metadata_2a) == "CalculatedWeeks"] <- "timepoint"
+colnames(metadata_2a)[colnames(metadata_2a) == "sampleId"] <- "sampleID"
+metadata_2a$sampleID <- gsub("-", "_", metadata_2a$sampleID)
+
+plot_data <- merge(metadata_2a, otus_top10_t, by = "sampleID")
+taxa_cols <- colnames(otus_top10_t)[-1]
+
+plot_df_long <- plot_data %>%
+  gather(key = "species", value = "relative_abundance", all_of(taxa_cols)) %>%
+  separate(col = species, sep = "g__", into = c("uplevel", "clean_species"),
+           remove = FALSE, extra = "merge") %>%
+  mutate(species_label = ifelse(is.na(clean_species), species, clean_species))
+
+# Clean species names — using bare gsub (regex mode) as in original .R file
+plot_df_long$species_label <- gsub("Bifidobacterium.s__longum", "Bifidobacterium longum", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Escherichia.s__coli", "Escherichia coli", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Streptococcus.s__salivarius", "Streptococcus salivarius", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Bacteroides.s__fragilis", "Bacteroides fragilis", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Bifidobacterium.s__breve", "Bifidobacterium breve", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Veillonella.s__ratti", "Veillonella ratti", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Prevotella_9.s__", "Prevotella 9", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Bacteroides.s__vulgatus", "Bacteroides vulgatus", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Faecalibacterium.s__prausnitzii", "Faecalibacterium prausnitzii", plot_df_long$species_label)
+plot_df_long$species_label <- gsub("Blautia.s__", "Blautia ", plot_df_long$species_label)
+
+plot_df_long$timepoint <- as.numeric(plot_df_long$timepoint)
+plot_df_long$relative_abundance <- as.numeric(plot_df_long$relative_abundance)
+
+p2a <- ggplot(plot_df_long, aes(color = species_label, x = timepoint, y = relative_abundance)) +
+  theme_bw() +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(x = "Weeks", y = "Relative Abundance (%)", color = "Top 10 Genus Species") +
+  theme(text = element_text(size = 20))
+print(p2a)
+save_fig(p2a, "Fig2A_top10_species", width = 12, height = 7)
+```
+
+## Figure 2B: PCoA by timepoint
+
+```{r fig2b, fig.cap="PCoA of Bray-Curtis distance by timepoint."}
+set.seed(11)
+dataset_2b <- make_clean_meco()
+dataset_2b$sample_table <- subset(dataset_2b$sample_table, Time %in% c("6W", "3M", "6M", "1Y"))
+dataset_2b$tidy_dataset()
+dataset_2b$sample_table$Time %<>% factor(., levels = c("6W", "3M", "6M", "1Y"))
+dataset_2b$cal_betadiv(unifrac = FALSE)
+
+t1 <- trans_beta$new(dataset = dataset_2b, group = "Time", measure = "bray")
+t1$cal_ordination(method = "PCoA")
+p2b <- t1$plot_ordination(plot_color = "Time", plot_shape = "Time",
+                   plot_type = c("point", "ellipse"), color_values = timecolors) +
+  theme(text = element_text(size = 20))
+print(p2b)
+save_fig(p2b, "Fig2B_PCoA_timepoint", width = 10, height = 7)
+```
+
+## Figures 2C-E: PCoA by malaria status at each timepoint
+
+```{r fig2cde, fig.width=18, fig.height=6, fig.cap="PCoA by malaria status at 6W, 3M, and 6M."}
+set.seed(11)
+pcoa_by_malaria <- function(time_point) {
+  ds <- make_timepoint_meco(time_point)
+  ds$cal_betadiv(unifrac = FALSE)
+  t1 <- trans_beta$new(dataset = ds, group = "BeforeMalaria", measure = "bray")
+  t1$cal_ordination(method = "PCoA")
+  t1$plot_ordination(plot_color = "BeforeMalaria", plot_shape = "BeforeMalaria",
+                     plot_type = c("point", "ellipse"), color_values = color_vals) +
+    theme(text = element_text(size = 20)) + ggtitle(time_point)
+}
+
+p2c <- pcoa_by_malaria("6W")
+p2d <- pcoa_by_malaria("3M")
+p2e <- pcoa_by_malaria("6M")
+p2cde <- plot_grid(p2c, p2d, p2e, ncol = 3)
+print(p2cde)
+save_fig(p2cde, "Fig2CDE_PCoA_malaria", width = 18, height = 6)
+```
+
+
+# Figure 3: Differential Abundance (LEfSe & SplinectomeR)
+
+## Figures 3A-F: LEfSe analysis
+
+```{r fig3af, fig.width=20, fig.height=12, fig.cap="LEfSe analysis at 6W, 3M, and 6M."}
+set.seed(11)
+get_lefse_plots <- function(time_point, taxa_indices) {
+  dataset <- make_clean_meco()
+  dataset$sample_table <- subset(dataset$sample_table, 
+                                  Time == time_point & Type == "sample")
+  dataset$sample_table$BeforeMalaria[is.na(dataset$sample_table$BeforeMalaria)] <- "Never"
+  dataset$sample_table <- subset(dataset$sample_table, BeforeMalaria %in% c("Yes", "Never"))
+  dataset$sample_table$BeforeMalaria <- gsub("Yes", "Susceptible", dataset$sample_table$BeforeMalaria)
+  dataset$sample_table$BeforeMalaria <- gsub("Never", "Resistant", dataset$sample_table$BeforeMalaria)
+  dataset$tidy_dataset()
+  dataset$cal_abund()
+  
+  t1 <- trans_diff$new(dataset = dataset, method = "lefse", group = "BeforeMalaria",
+                        alpha = 0.05, p_adjust_method = "none")
+  # NOTE: LEfSe is run without FDR correction (its default). When FDR
+  # correction was applied, no taxa reached significance at any timepoint,
+  # indicating that the LEfSe results should be interpreted as exploratory.
+  # The key taxa identified here are independently confirmed by ANCOM-BC
+  # (Holm-corrected) and DAR multi-method consensus analysis.
+  
+  plot_bar <- t1$plot_diff_bar(use_number = taxa_indices, width = 0.8,
+                                color_values = c(JulieBlue, JulieRed)) +
+    theme(text = element_text(size = 20))
+  plot_abund <- t1$plot_diff_abund(use_number = taxa_indices,
+                                    color_values = c(JulieBlue, JulieRed),
+                                    add_sig = FALSE) +
+    theme(text = element_text(size = 20))
+  return(list(bar = plot_bar, abund = plot_abund))
+}
+
+plots_6w <- get_lefse_plots("6W", 1:13)
+plots_3m <- get_lefse_plots("3M", 1:6)
+plots_6m <- get_lefse_plots("6M", 1:6)
+
+legend_b <- get_legend(plots_6w$bar)
+
+col1 <- plot_grid(ggdraw() + draw_label("A: 6 Weeks", size = 20),
+                  plots_6w$bar + theme(legend.position = "none"),
+                  plots_6w$abund + theme(legend.position = "none"),
+                  ncol = 1, rel_heights = c(0.1, 1, 1))
+col2 <- plot_grid(ggdraw() + draw_label("B: 3 Months", size = 20),
+                  plots_3m$bar + theme(legend.position = "none"),
+                  plots_3m$abund + theme(legend.position = "none"),
+                  ncol = 1, rel_heights = c(0.1, 1, 1))
+col3 <- plot_grid(ggdraw() + draw_label("C: 6 Months", size = 20),
+                  plots_6m$bar + theme(legend.position = "none"),
+                  plots_6m$abund + theme(legend.position = "none"),
+                  ncol = 1, rel_heights = c(0.1, 1, 1))
+
+combined_lefse <- plot_grid(col1, col2, col3, legend_b, ncol = 4, rel_widths = c(1, 1, 1, 0.5))
+print(combined_lefse)
+save_fig(combined_lefse, "Fig3_LEfSe_combined", width = 20, height = 12)
+```
+
+**Note on LEfSe p-value correction:** LEfSe was run using its default (no FDR correction). When FDR correction was applied as a sensitivity check, no taxa reached significance at any timepoint, indicating that the LEfSe-specific results are exploratory. Importantly, the key taxa identified by LEfSe — including *Bifidobacterium*, *Streptococcus*, *Klebsiella*, *Megasphaera*, and *Lactobacillaceae* — are independently confirmed as differentially abundant by ANCOM-BC (Holm-corrected, controlling for sex and antibiotics) and by DAR multi-method consensus (significance by ≥2 methods). The LEfSe results are therefore presented as corroborative rather than standalone evidence.
+
+## Figures 3G-H: SplinectomeR longitudinal analysis
+
+The custom `permuspliner_full` function is defined here and used for both
+*S. salivarius* (3G) and *K. pneumoniae* (3H).
+
+```{r permuspliner-function}
+# Custom permuspliner function — verbatim from Figure_3G.R / Figure_3H.R
+permuspliner_full <- function(data = NULL, xvar = NULL, yvar = NULL, category = NULL,
+                              cases = NULL, groups = NA, perms = 999, retain_perm = TRUE,
+                              test_direction = 'more', cut_low = NA,
+                              ints = 1000, quiet = FALSE, cut_sparse = 4, ...) {
+  
+  suppargs <- list(...)
+  if ("set_spar" %in% names(suppargs)) {
+    set_spar = as.numeric(suppargs$set_spar)
+  } else {set_spar <- NULL}
+  
+  if ("set_tol" %in% names(suppargs)) {
+    set_tol = as.numeric(suppargs$set_tol)
+  } else {set_tol <- 1e-4}
+  
+  if ("pmethod" %in% names(suppargs)) {
+    pmethod = as.character(suppargs$pmethod)
+  } else {pmethod <- 'loess'}
+  
+  if (missing(data) | missing(category) | missing(xvar) | missing(yvar) | missing(cases)) {
+    stop('Missing required parameter(s).')
+  }
+  
+  perms = as.numeric(perms)
+  ints = as.numeric(ints)
+  cases = as.character(cases)
+  groups = as.character(groups)
+  
+  in_df <- data
+  if (is.na(groups[1])) {
+    v1 <- as.character(unique(in_df[, category])[1])
+    v2 <- as.character(unique(in_df[, category])[2])
+  } else {
+    v1 <- as.character(groups[1])
+    v2 <- as.character(groups[2])
+  }
+  
+  if (!is.na(cut_low)) {
+    cut_low <- as.numeric(cut_low)
+    keep_ids <- data.frame(table(in_df[, cases]))
+    keep_ids <- as.character(keep_ids[keep_ids$Freq > cut_low, ]$Var1)
+    in_df <- in_df[in_df[, cases] %in% keep_ids, ]
+  }
+  
+  df_v1 <- in_df[in_df[, category] %in% c(v1) & !is.na(in_df[, xvar]), ]
+  df_v2 <- in_df[in_df[, category] %in% c(v2) & !is.na(in_df[, xvar]), ]
+  
+  if (length(df_v1[, xvar]) < cut_sparse | length(df_v2[, xvar]) < cut_sparse) {
+    stop('Not enough data in each group to fit spline')
+  }
+  
+  if (pmethod=='cubic') {
+    df_v1_spl <- with(df_v1, smooth.spline(x=df_v1[, xvar], y=df_v1[, yvar], spar = set_spar, tol = set_tol))
+    df_v2_spl <- with(df_v2, smooth.spline(x=df_v2[, xvar], y=df_v2[, yvar], spar = set_spar, tol = set_tol))
+  } else if (pmethod == 'loess') {
+    testform <- reformulate(termlabels = xvar, response = yvar)
+    if (is.null(set_spar)) {
+      df_v1_spl <- with(df_v1, loess(testform, data=df_v1))
+      df_v2_spl <- with(df_v2, loess(testform, data=df_v2))
+    } else {
+      df_v1_spl <- with(df_v1, loess(testform, data=df_v1, span = set_spar))
+      df_v2_spl <- with(df_v2, loess(testform, data=df_v2, span = set_spar))
+    }
+  }
+  
+  x0 <- max(c(min(df_v1_spl$x)), min(df_v2_spl$x))
+  x1 <- min(c(max(df_v1_spl$x)), max(df_v2_spl$x))
+  xby <- (x1 - x0) / (ints - 1)
+  xx <- seq(x0, x1, by = xby)
+  
+  v1_spl_f <- data.frame(predict(df_v1_spl, xx))
+  if (ncol(v1_spl_f)==1) v1_spl_f <- cbind(xx,v1_spl_f)
+  colnames(v1_spl_f) <- c('x', 'var1')
+  v2_spl_f <- data.frame(predict(df_v2_spl, xx))
+  if (ncol(v2_spl_f)==1) v2_spl_f <- cbind(xx,v2_spl_f)
+  colnames(v2_spl_f) <- c('x', 'var2')
+  
+  real_spl_dist <- merge(v1_spl_f, v2_spl_f, by = 'x')
+  real_spl_dist$abs.distance <- abs(real_spl_dist$var1 - real_spl_dist$var2)
+  real_area <- sum(real_spl_dist$abs.distance) / ints
+  
+  case_shuff <- 'case_shuff'
+  
+  .spline_permute <- function(randy) {
+    randy_meta <- randy[!duplicated(randy[, cases]), ]
+    randy_meta$case_shuff <- sample(randy_meta[, category])
+    randy_meta <- randy_meta[, c(cases, case_shuff)]
+    randy <- merge(randy, randy_meta, by = cases, all = T)
+    randy_v1 <- randy[randy[, case_shuff] %in% c(v1) & !is.na(randy[, xvar]), ]
+    randy_v2 <- randy[randy[, case_shuff] %in% c(v2) & !is.na(randy[, xvar]), ]
+    
+    if (pmethod == 'cubic') {
+      randy_v1_spl <- with(randy_v1, smooth.spline(x=randy_v1[, xvar], y=randy_v1[, yvar], spar = set_spar, tol = set_tol))
+      randy_v2_spl <- with(randy_v2, smooth.spline(x=randy_v2[, xvar], y=randy_v2[, yvar], spar = set_spar, tol = set_tol))
+    } else if (pmethod == 'loess') {
+      if (is.null(set_spar)) {
+        randy_v1_spl <- with(randy_v1, loess(testform, data=randy_v1))
+        randy_v2_spl <- with(randy_v2, loess(testform, data=randy_v2))
+      } else {
+        randy_v1_spl <- with(randy_v1, loess(testform, data=randy_v1, span = set_spar))
+        randy_v2_spl <- with(randy_v2, loess(testform, data=randy_v2, span = set_spar))
+      }
+    }
+    
+    randy_v1_fit <- data.frame(predict(randy_v1_spl, xx))
+    if (ncol(randy_v1_fit)==1) randy_v1_fit <- cbind(xx,randy_v1_fit)
+    colnames(randy_v1_fit) <- c('x', 'var1')
+    randy_v2_fit <- data.frame(predict(randy_v2_spl, xx))
+    if (ncol(randy_v2_fit)==1) randy_v2_fit <- cbind(xx,randy_v2_fit)
+    colnames(randy_v2_fit) <- c('x', 'var2')
+    
+    spl_dist <- merge(randy_v1_fit, randy_v2_fit, by = 'x')
+    spl_dist$abs_distance <- abs(spl_dist$var1 - spl_dist$var2)
+    
+    if (retain_perm == TRUE) {
+      transfer_perms <- spl_dist[, 2:4]
+      colnames(transfer_perms) <- c(paste0('v1perm_',ix), paste0('v2perm_',ix), paste0('pdistance_',ix))
+      if (ix > 1) perm_retainer <- perm_output$perm_retainer
+      perm_retainer <- cbind(perm_retainer, transfer_perms)
+      perm_output$perm_retainer <- perm_retainer
+      perm_area <- sum(spl_dist$abs_distance, na.rm = T) / sum(!is.na(spl_dist$abs_distance))
+      if (ix > 1) permuted <- perm_output$permuted
+      permuted <- append(permuted, perm_area)
+      perm_output$permuted <- permuted
+      return(perm_output)
+    } else {
+      perm_area <- sum(spl_dist$abs_distance, na.rm = T) / sum(!is.na(spl_dist$abs_distance))
+      permuted <- append(permuted, perm_area)
+      return(permuted)
+    }
+  }
+  
+  in_rand <- rbind(df_v1, df_v2)
+  permuted <- list()
+  if (retain_perm == TRUE) {
+    perm_output <- list()
+    perm_retainer <- data.frame(row.names = xx)
+    for (ix in 1:perms) {
+      perm_output <- .spline_permute(randy = in_rand)
+    }
+    if (test_direction == 'more') {
+      pval <- (sum(perm_output$permuted >= as.numeric(real_area)) + 1) / (perms + 1)
+    } else {
+      pval <- (sum(perm_output$permuted <= as.numeric(real_area)) + 1) / (perms + 1)
+    }
+  } else {
+    permuted <- replicate(perms, .spline_permute(randy = in_rand))
+    if (test_direction == 'more') {
+      pval <- (sum(permuted >= as.numeric(real_area)) + 1) / (perms + 1)
+    } else {
+      pval <- (sum(permuted <= as.numeric(real_area)) + 1) / (perms + 1)
+    }
+  }
+  
+  v1_data <- df_v1; v2_data <- df_v2
+  v1_data[, category] <- droplevels(factor(v1_data[, category]))
+  v2_data[, category] <- droplevels(factor(v2_data[, category]))
+  
+  if (retain_perm == TRUE) {
+    result <- list("pval" = pval, "category_1" = v1, "category_2" = v2,
+                   "v1_interpolated" = v1_spl_f, "v2_interpolated" = v2_spl_f,
+                   "v1_spline" = df_v1_spl, "v2_spline" = df_v2_spl,
+                   "permuted_splines" = perm_output$perm_retainer,
+                   "true_distance" = real_spl_dist,
+                   "v1_data" = v1_data, "v2_data" = v2_data)
+  } else {
+    result <- list("pval" = pval, "v1_interpolated" = v1_spl_f, "v2_interpolated" = v2_spl_f,
+                   "v1_spline" = df_v1_spl, "v2_spline" = df_v2_spl,
+                   "v1_data" = v1_data, "v2_data" = v2_data)
+  }
+  return(result)
+}
+```
+
+```{r splinectomer-data-prep}
+set.seed(11)
+# Prepare shared data for SplinectomeR (Figures 3G, 3H)
+ps_spline <- phyloseq::subset_samples(combinedcongo, 
+                             Type == "sample" & !phyloseq::sample_names(combinedcongo) %in% samples_to_remove)
+ds_spline <- make_clean_meco(ps_spline)
+ds_spline$cal_abund()
+
+species_abund <- ds_spline$taxa_abund$Species
+species_abund$Taxa <- rownames(species_abund)
+
+metadata_spline <- ds_spline$sample_table
+colnames(metadata_spline)[colnames(metadata_spline) == "CalculatedWeeks"] <- "timepoint"
+colnames(metadata_spline)[colnames(metadata_spline) == "sampleId"] <- "sampleID"
+metadata_spline$sampleID <- gsub("-", "_", metadata_spline$sampleID)
+
+species_meta <- flip_split_merge(species_abund, metadata_spline)
+species_meta_long <- species_meta %>%
+  gather(key = "species", value = "relative_abundance", contains("k__"))
+species_meta_long$species <- gsub("|", ".", species_meta_long$species, fixed = TRUE)
+```
+
+```{r fig3g, fig.cap="S. salivarius longitudinal SplinectomeR (p = .307)."}
+set.seed(11)
+target_3g <- "k__Bacteria.p__Firmicutes.c__Bacilli.o__Lactobacillales.f__Streptococcaceae.g__Streptococcus.s__salivarius"
+sal_data <- species_meta_long %>%
+  filter(species == target_3g) %>% drop_na(Malaria)
+sal_data$relative_abundance <- as.numeric(sal_data$relative_abundance)
+sal_data$timepoint <- as.numeric(sal_data$timepoint)
+
+sal_result <- permuspliner_full(data = sal_data, xvar = "timepoint",
+                                 yvar = "relative_abundance", perms = 999,
+                                 category = "Malaria", cases = "Individual",
+                                 retain_perm = TRUE)
+sal_plot <- permuspliner.plot.permsplines(data = sal_result, xvar = "Time",
+                                           yvar = "Relative Abundance")
+p3g <- sal_plot + labs(title = "S. salivarius") +
+  theme(plot.title = element_text(face = "italic")) +
+  scale_x_continuous(limits = c(6, 54), breaks = c(6, 12, 24, 54),
+                     labels = c("6 Weeks", "3 Months", "6 Months", "1 Year")) +
+  scale_color_manual(values = c(JulieBlue, JulieRed), name = "Malaria Infection") +
+  theme(text = element_text(size = 20), legend.position = "none")
+print(p3g)
+save_fig(p3g, "Fig3G_salivarius_spline", width = 10, height = 7)
+```
+
+```{r fig3h, fig.cap="K. pneumoniae longitudinal SplinectomeR (p = .047)."}
+set.seed(11)
+target_3h <- "k__Bacteria.p__Proteobacteria.c__Gammaproteobacteria.o__Enterobacterales.f__Enterobacteriaceae.g__Klebsiella.s__pneumoniae"
+pneu_data <- species_meta_long %>%
+  filter(species == target_3h) %>% drop_na(Malaria)
+pneu_data$relative_abundance <- as.numeric(pneu_data$relative_abundance)
+pneu_data$timepoint <- as.numeric(pneu_data$timepoint)
+
+pneu_result <- permuspliner_full(data = pneu_data, xvar = "timepoint",
+                                  yvar = "relative_abundance", perms = 999,
+                                  category = "Malaria", cases = "Individual",
+                                  retain_perm = TRUE)
+pneu_plot <- permuspliner.plot.permsplines(data = pneu_result, xvar = "Time",
+                                            yvar = "Relative Abundance")
+p3h <- pneu_plot + labs(title = "K. pneumoniae") +
+  theme(plot.title = element_text(face = "italic")) +
+  scale_x_continuous(limits = c(6, 54), breaks = c(6, 12, 24, 54),
+                     labels = c("6 Weeks", "3 Months", "6 Months", "1 Year")) +
+  scale_color_manual(values = c(JulieBlue, JulieRed), name = "Malaria Infection") +
+  theme(text = element_text(size = 20), legend.position = "none")
+print(p3h)
+save_fig(p3h, "Fig3H_pneumoniae_spline", width = 10, height = 7)
+```
+
+
+# Figure 5: ANCOM-BC Differential Abundance (with Heatmaps)
+
+ANCOM-BC analyses are run at each timepoint, controlling for infant sex
+(`Baby.sex.x`) and antibiotic use (`Med_Antibiotic`).
+
+```{r fig5a, fig.cap="ANCOM-BC: 6 Weeks."}
+# Faithful reproduction of Figure_4A.R
+set.seed(11)
+
+pseq_t_5a <- phyloseq::transform_sample_counts(combinedcongo, function(x) x/sum(x)*100)
+pseq_t_5a <- phyloseq::subset_samples(pseq_t_5a, Type == "sample")
+sixw_data_5a <- phyloseq::subset_samples(pseq_t_5a, Time == "6W")
+sixw_data_5a <- microbiome::aggregate_taxa(sixw_data_5a, "Species")
+
+meta_df_5a <- as(phyloseq::sample_data(sixw_data_5a), "data.frame")
+meta_df_5a$BeforeMalaria[is.na(meta_df_5a$BeforeMalaria)] <- "Never"
+phyloseq::sample_data(sixw_data_5a) <- phyloseq::sample_data(meta_df_5a)
+sixw_data_5a <- phyloseq::subset_samples(sixw_data_5a, BeforeMalaria %in% c("Yes", "Never"))
+
+out_5a <- ancombc(data = sixw_data_5a, tax_level = "Species",
+                   formula = "BeforeMalaria + Baby.sex.x + Med_Antibiotic",
+                   p_adj_method = "holm", group = "BeforeMalaria", struc_zero = TRUE,
+                   neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                   alpha = 0.05, n_cl = 1, verbose = FALSE)
+
+res_q_5a <- out_5a$res$q_val
+target_col_5a <- colnames(res_q_5a)[grep("BeforeMalaria.*Yes", colnames(res_q_5a))][1]
+if (is.na(target_col_5a)) target_col_5a <- "BeforeMalariaYes"
+res_sorted_5a <- res_q_5a[order(res_q_5a[[target_col_5a]], na.last = NA), ]
+
+if ("taxon" %in% colnames(res_sorted_5a)) { taxa_sig_5a <- res_sorted_5a$taxon } else { taxa_sig_5a <- rownames(res_sorted_5a) }
+# Top 11 for 6W
+taxa_sig_5a <- taxa_sig_5a[1:min(11, length(taxa_sig_5a))]
+taxa_sig_5a <- unique(c(taxa_sig_5a, "haemolyticus", "magna"))
+
+# Lookup table
+look_data_5a <- phyloseq::subset_samples(pseq_t_5a, Time == "6W")
+ps_species_5a <- phyloseq::tax_glom(look_data_5a, "Species")
+lt_5a <- as.data.frame(phyloseq::tax_table(ps_species_5a))
+lt_5a$GenusL <- substr(lt_5a$Genus, 1, 1)
+lt_5a$SpeciesL <- paste(lt_5a$GenusL, lt_5a$Species, sep = ". ")
+
+datasetsig_5a <- phyloseq2meco(sixw_data_5a)
+datasetsig_5a$tidy_dataset()
+t1_5a <- trans_abund$new(dataset = datasetsig_5a, taxrank = "Species", input_taxaname = taxa_sig_5a)
+t1_5a$data_taxanames <- lt_5a$SpeciesL[match(t1_5a$data_taxanames, lt_5a$Species)]
+t1_5a$data_abund$Taxonomy <- lt_5a$SpeciesL[match(t1_5a$data_abund$Taxonomy, lt_5a$Species)]
+
+p5a <- t1_5a$plot_box(group = "BeforeMalaria") +
+  scale_y_continuous(trans = "log10") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("black", "black")) +
+  guides(fill = guide_legend(title = "Before Malaria")) +
+  ggtitle("\nTaxa") +
+  theme(plot.title = element_text(hjust = 0.5, margin = ggplot2::margin(50, 0, 20, 0))) +
+  theme(text = element_text(size = 20, face = "bold"))
+print(p5a)
+save_fig(p5a, "Fig5A_ANCOMBC_6W", width = 10, height = 7)
+```
+
+### Sensitivity check: ANCOM-BC at 6W adjusted for bednet use
+
+```{r ancombc-bednet-sensitivity}
+# Re-run 6W ANCOM-BC with bednet added to the formula
+set.seed(11)
+
+pseq_t_bn <- phyloseq::transform_sample_counts(combinedcongo, function(x) x/sum(x)*100)
+pseq_t_bn <- phyloseq::subset_samples(pseq_t_bn, Type == "sample")
+sixw_bn <- phyloseq::subset_samples(pseq_t_bn, Time == "6W")
+sixw_bn <- microbiome::aggregate_taxa(sixw_bn, "Species")
+
+meta_bn <- as(phyloseq::sample_data(sixw_bn), "data.frame")
+meta_bn$BeforeMalaria[is.na(meta_bn$BeforeMalaria)] <- "Never"
+phyloseq::sample_data(sixw_bn) <- phyloseq::sample_data(meta_bn)
+sixw_bn <- phyloseq::subset_samples(sixw_bn, BeforeMalaria %in% c("Yes", "Never"))
+
+out_bn <- ancombc(data = sixw_bn, tax_level = "Species",
+                   formula = "BeforeMalaria + Baby.sex.x + Med_Antibiotic + X27_Bednet.y",
+                   p_adj_method = "holm", group = "BeforeMalaria", struc_zero = TRUE,
+                   neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                   alpha = 0.05, n_cl = 1, verbose = FALSE)
+
+res_q_bn <- out_bn$res$q_val
+target_col_bn <- colnames(res_q_bn)[grep("BeforeMalaria.*Yes", colnames(res_q_bn))][1]
+if (is.na(target_col_bn)) target_col_bn <- "BeforeMalariaYes"
+res_sorted_bn <- res_q_bn[order(res_q_bn[[target_col_bn]], na.last = NA), ]
+
+# Show taxa that remain significant (q < 0.05) after bednet adjustment
+sig_bn <- res_sorted_bn[res_sorted_bn[[target_col_bn]] < 0.05, ]
+if ("taxon" %in% colnames(sig_bn)) sig_taxa_bn <- sig_bn$taxon else sig_taxa_bn <- rownames(sig_bn)
+
+cat("=== ANCOM-BC 6W: Bednet-adjusted significant taxa (q < 0.05) ===\n")
+cat(sprintf("Original formula: BeforeMalaria + Baby.sex.x + Med_Antibiotic\n"))
+cat(sprintf("Adjusted formula: BeforeMalaria + Baby.sex.x + Med_Antibiotic + X27_Bednet.y\n\n"))
+cat(sprintf("%d taxa significant after bednet adjustment:\n", length(sig_taxa_bn)))
+if (length(sig_taxa_bn) > 0) print(sig_bn[, c("taxon", target_col_bn)][1:min(20, nrow(sig_bn)), ])
+```
+
+```{r fig5b, fig.cap="ANCOM-BC: 3 Months."}
+# Faithful reproduction of Figure_4B.R
+set.seed(11)
+
+pseq_t_5b <- phyloseq::transform_sample_counts(combinedcongo, function(x) x/sum(x)*100)
+pseq_t_5b <- phyloseq::subset_samples(pseq_t_5b, Type == "sample")
+threem_data_5b <- phyloseq::subset_samples(pseq_t_5b, Time == "3M")
+threem_data_5b <- microbiome::aggregate_taxa(threem_data_5b, "Species")
+
+meta_df_5b <- as(phyloseq::sample_data(threem_data_5b), "data.frame")
+meta_df_5b$BeforeMalaria[is.na(meta_df_5b$BeforeMalaria)] <- "Never"
+phyloseq::sample_data(threem_data_5b) <- phyloseq::sample_data(meta_df_5b)
+threem_data_5b <- phyloseq::subset_samples(threem_data_5b, BeforeMalaria %in% c("Yes", "Never"))
+
+out_5b <- ancombc(data = threem_data_5b, tax_level = "Species",
+                   formula = "BeforeMalaria + Baby.sex.x + Med_Antibiotic",
+                   p_adj_method = "holm", group = "BeforeMalaria", struc_zero = TRUE,
+                   neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                   alpha = 0.05, n_cl = 1, verbose = FALSE)
+
+res_q_5b <- out_5b$res$q_val
+target_col_5b <- colnames(res_q_5b)[grep("BeforeMalaria.*Yes", colnames(res_q_5b))][1]
+if (is.na(target_col_5b)) target_col_5b <- "BeforeMalariaYes"
+res_sorted_5b <- res_q_5b[order(res_q_5b[[target_col_5b]], na.last = NA), ]
+
+# q < 0.05 for 3M (NOT top 11)
+sig_rows_5b <- res_sorted_5b[res_sorted_5b[[target_col_5b]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_5b)) taxa_sig_5b <- sig_rows_5b$taxon else taxa_sig_5b <- rownames(sig_rows_5b)
+taxa_sig_5b <- unlist(taxa_sig_5b)
+taxa_sig_5b <- unique(c(taxa_sig_5b, "faecium", "haemolyticus"))
+
+# Lookup table
+look_data_5b <- phyloseq::subset_samples(pseq_t_5b, Time == "3M")
+ps_species_5b <- phyloseq::tax_glom(look_data_5b, "Species")
+lt_5b <- as.data.frame(phyloseq::tax_table(ps_species_5b))
+lt_5b$GenusL <- substr(lt_5b$Genus, 1, 1)
+lt_5b$SpeciesL <- paste(lt_5b$GenusL, lt_5b$Species, sep = ". ")
+
+datasetsig_5b <- phyloseq2meco(threem_data_5b)
+datasetsig_5b$tidy_dataset()
+t1_5b <- trans_abund$new(dataset = datasetsig_5b, taxrank = "Species", input_taxaname = taxa_sig_5b)
+t1_5b$data_taxanames <- lt_5b$SpeciesL[match(t1_5b$data_taxanames, lt_5b$Species)]
+t1_5b$data_abund$Taxonomy <- lt_5b$SpeciesL[match(t1_5b$data_abund$Taxonomy, lt_5b$Species)]
+
+p5b <- t1_5b$plot_box(group = "BeforeMalaria") +
+  scale_y_continuous(trans = "log10") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("black", "black")) +
+  guides(fill = guide_legend(title = "Before Malaria")) +
+  ggtitle("\nTaxa") +
+  theme(plot.title = element_text(hjust = 0.5, margin = ggplot2::margin(50, 0, 20, 0))) +
+  theme(text = element_text(size = 20, face = "bold")) +
+  theme(plot.margin = ggplot2::margin(t = 20, r = 20, b = 20, l = 20, unit = "pt"))
+print(p5b)
+save_fig(p5b, "Fig5B_ANCOMBC_3M", width = 10, height = 7)
+```
+
+```{r fig5c, fig.cap="ANCOM-BC: 6 Months."}
+# Faithful reproduction of Figure_4C.R
+set.seed(11)
+
+pseq_t_5c <- phyloseq::transform_sample_counts(combinedcongo, function(x) x/sum(x)*100)
+pseq_t_5c <- phyloseq::subset_samples(pseq_t_5c, Type == "sample")
+sixm_data_5c <- phyloseq::subset_samples(pseq_t_5c, Time == "6M")
+sixm_data_5c <- microbiome::aggregate_taxa(sixm_data_5c, "Species")
+
+meta_df_5c <- as(phyloseq::sample_data(sixm_data_5c), "data.frame")
+meta_df_5c$BeforeMalaria[is.na(meta_df_5c$BeforeMalaria)] <- "Never"
+phyloseq::sample_data(sixm_data_5c) <- phyloseq::sample_data(meta_df_5c)
+sixm_data_5c <- phyloseq::subset_samples(sixm_data_5c, BeforeMalaria %in% c("Yes", "Never"))
+
+out_5c <- ancombc(data = sixm_data_5c, tax_level = "Species",
+                   formula = "BeforeMalaria + Baby.sex.x + Med_Antibiotic",
+                   p_adj_method = "holm", group = "BeforeMalaria", struc_zero = TRUE,
+                   neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                   alpha = 0.05, n_cl = 1, verbose = FALSE)
+
+res_q_5c <- out_5c$res$q_val
+target_col_5c <- colnames(res_q_5c)[grep("BeforeMalaria.*Yes", colnames(res_q_5c))][1]
+if (is.na(target_col_5c)) target_col_5c <- "BeforeMalariaYes"
+res_sorted_5c <- res_q_5c[order(res_q_5c[[target_col_5c]], na.last = NA), ]
+
+# q < 0.05 for 6M (NOT top 11)
+sig_rows_5c <- res_sorted_5c[res_sorted_5c[[target_col_5c]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_5c)) taxa_sig_5c <- sig_rows_5c$taxon else taxa_sig_5c <- rownames(sig_rows_5c)
+taxa_sig_5c <- unlist(taxa_sig_5c)
+taxa_sig_5c <- unique(c(taxa_sig_5c, "faecis", "magna", "dispar"))
+
+# Lookup table
+look_data_5c <- phyloseq::subset_samples(pseq_t_5c, Time == "6M")
+ps_species_5c <- phyloseq::tax_glom(look_data_5c, "Species")
+lt_5c <- as.data.frame(phyloseq::tax_table(ps_species_5c))
+lt_5c$GenusL <- substr(lt_5c$Genus, 1, 1)
+lt_5c$SpeciesL <- paste(lt_5c$GenusL, lt_5c$Species, sep = ". ")
+
+datasetsig_5c <- phyloseq2meco(sixm_data_5c)
+datasetsig_5c$tidy_dataset()
+t1_5c <- trans_abund$new(dataset = datasetsig_5c, taxrank = "Species", input_taxaname = taxa_sig_5c)
+t1_5c$data_taxanames <- lt_5c$SpeciesL[match(t1_5c$data_taxanames, lt_5c$Species)]
+t1_5c$data_abund$Taxonomy <- lt_5c$SpeciesL[match(t1_5c$data_abund$Taxonomy, lt_5c$Species)]
+
+# Manual override: [. innocuum -> C. Innocuum
+t1_5c$data_taxanames[t1_5c$data_taxanames == "[. innocuum"] <- "C. Innocuum"
+t1_5c$data_abund$Taxonomy[t1_5c$data_abund$Taxonomy == "[. innocuum"] <- "C. Innocuum"
+
+p5c <- t1_5c$plot_box(group = "BeforeMalaria") +
+  scale_y_continuous(trans = "log10") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("black", "black")) +
+  guides(fill = guide_legend(title = "Before Malaria")) +
+  ggtitle("\nTaxa") +
+  theme(plot.title = element_text(hjust = 0.5, margin = ggplot2::margin(50, 0, 20, 0))) +
+  theme(text = element_text(size = 20, face = "bold"))
+print(p5c)
+save_fig(p5c, "Fig5C_ANCOMBC_6M", width = 10, height = 7)
+```
+
+```{r fig5d, fig.cap="ANCOM-BC: 1 Year (grouped by malaria history)."}
+# Faithful reproduction of Figure_4D.R
+set.seed(11)
+
+pseq_t_5d <- phyloseq::transform_sample_counts(combinedcongo, function(x) x/sum(x)*100)
+pseq_t_5d <- phyloseq::subset_samples(pseq_t_5d, Type == "sample")
+oney_data_5d <- phyloseq::subset_samples(pseq_t_5d, Time == "1Y")
+oney_data_5d <- microbiome::aggregate_taxa(oney_data_5d, "Species")
+oney_data_5d <- phyloseq::subset_samples(oney_data_5d, !is.na(Malaria))
+
+out_5d <- ancombc(data = oney_data_5d, tax_level = "Species",
+                   formula = "Malaria + Baby.sex.x + Med_Antibiotic",
+                   p_adj_method = "holm", group = "Malaria", struc_zero = TRUE,
+                   neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                   alpha = 0.05, n_cl = 1, verbose = FALSE)
+
+res_q_5d <- out_5d$res$q_val
+target_col_5d <- colnames(res_q_5d)[grep("Malaria.*Yes", colnames(res_q_5d))][1]
+if (is.na(target_col_5d)) target_col_5d <- "MalariaYes"
+res_sorted_5d <- res_q_5d[order(res_q_5d[[target_col_5d]], na.last = NA), ]
+
+# q < 0.05 for 1Y (NOT top 11)
+sig_rows_5d <- res_sorted_5d[res_sorted_5d[[target_col_5d]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_5d)) taxa_sig_5d <- sig_rows_5d$taxon else taxa_sig_5d <- rownames(sig_rows_5d)
+taxa_sig_5d <- unlist(taxa_sig_5d)
+taxa_sig_5d <- unique(c(taxa_sig_5d, "finegoldii"))
+
+# Lookup table
+look_data_5d <- phyloseq::subset_samples(pseq_t_5d, Time == "1Y")
+ps_species_5d <- phyloseq::tax_glom(look_data_5d, "Species")
+lt_5d <- as.data.frame(phyloseq::tax_table(ps_species_5d))
+lt_5d$GenusL <- substr(lt_5d$Genus, 1, 1)
+lt_5d$SpeciesL <- paste(lt_5d$GenusL, lt_5d$Species, sep = ". ")
+
+datasetsig_5d <- phyloseq2meco(oney_data_5d)
+datasetsig_5d$tidy_dataset()
+t1_5d <- trans_abund$new(dataset = datasetsig_5d, taxrank = "Species", input_taxaname = taxa_sig_5d)
+t1_5d$data_taxanames <- lt_5d$SpeciesL[match(t1_5d$data_taxanames, lt_5d$Species)]
+t1_5d$data_abund$Taxonomy <- lt_5d$SpeciesL[match(t1_5d$data_abund$Taxonomy, lt_5d$Species)]
+
+# Manual overrides
+t1_5d$data_taxanames[t1_5d$data_taxanames == "[. faecis"] <- "R. faecis"
+t1_5d$data_abund$Taxonomy[t1_5d$data_abund$Taxonomy == "[. faecis"] <- "R. faecis"
+t1_5d$data_taxanames[t1_5d$data_taxanames == "[. lactaris"] <- "R. lactaris"
+t1_5d$data_abund$Taxonomy[t1_5d$data_abund$Taxonomy == "[. lactaris"] <- "R. lactaris"
+
+p5d <- t1_5d$plot_box(group = "Malaria") +
+  scale_y_continuous(trans = "log10") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("black", "black")) +
+  guides(fill = guide_legend(title = "Malaria")) +
+  ggtitle("\nTaxa") +
+  theme(plot.title = element_text(hjust = 0.5, margin = ggplot2::margin(50, 0, 20, 0))) +
+  theme(text = element_text(size = 20, face = "bold"))
+print(p5d)
+save_fig(p5d, "Fig5D_ANCOMBC_1Y", width = 10, height = 7)
+```
+
+## Figure S2: ANCOM-BC Heatmaps
+
+Each heatmap is reproduced verbatim from its original `.R` file to preserve
+per-timepoint taxa selection logic, manual name overrides, and Phylum row annotations.
+
+```{r heatmap-helper}
+# Shared helper for ANCOM-BC heatmap infrastructure
+make_heatmap_base <- function(time_point, group_var = "BeforeMalaria",
+                               formula_str = "BeforeMalaria + Baby.sex.x + Med_Antibiotic") {
+  pseq_t <- phyloseq::transform_sample_counts(combinedcongo, function(x) x / sum(x) * 100)
+  keep_smp <- phyloseq::sample_data(pseq_t)$Type == "sample"
+  pseq_t <- phyloseq::prune_samples(keep_smp, pseq_t)
+  keep_tp <- phyloseq::sample_data(pseq_t)$Time == time_point
+  tp_data <- phyloseq::prune_samples(keep_tp, pseq_t)
+  
+  # Lookup table (before aggregation)
+  ps_species <- phyloseq::tax_glom(tp_data, "Species")
+  lt <- as.data.frame(phyloseq::tax_table(ps_species))
+  lt$GenusL <- substr(lt$Genus, 1, 1)
+  lt$SpeciesL <- paste(lt$GenusL, lt$Species, sep = ". ")
+  
+  tp_data <- microbiome::aggregate_taxa(tp_data, "Species")
+  
+  if (group_var == "BeforeMalaria") {
+    meta_df <- as(phyloseq::sample_data(tp_data), "data.frame")
+    meta_df$BeforeMalaria[is.na(meta_df$BeforeMalaria)] <- "Never"
+    phyloseq::sample_data(tp_data) <- phyloseq::sample_data(meta_df)
+    keep_grp <- phyloseq::sample_data(tp_data)$BeforeMalaria %in% c("Yes", "Never")
+    tp_data <- phyloseq::prune_samples(keep_grp, tp_data)
+  } else {
+    keep_grp <- !is.na(phyloseq::sample_data(tp_data)[[group_var]])
+    tp_data <- phyloseq::prune_samples(keep_grp, tp_data)
+  }
+  
+  out <- ancombc(data = tp_data, tax_level = "Species", formula = formula_str,
+                  p_adj_method = "holm", group = group_var, struc_zero = TRUE,
+                  neg_lb = TRUE, pseudo = TRUE, prv_cut = 0.10, lib_cut = 0,
+                  alpha = 0.05, n_cl = 1, verbose = FALSE)
+  
+  res_q <- out$res$q_val
+  target_col_idx <- grep(paste0(group_var, ".*Yes"), colnames(res_q))
+  if (length(target_col_idx) > 0) colnames(res_q)[target_col_idx] <- paste0(group_var, "Yes")
+  target_col <- paste0(group_var, "Yes")
+  res_q <- res_q[order(res_q[[target_col]], na.last = NA), ]
+  
+  list(tp_data = tp_data, res_q = res_q, target_col = target_col, lt = lt)
+}
+```
+
+```{r figs2a, fig.cap="ANCOM-BC heatmap: 6 Weeks."}
+# Faithful reproduction of Figure_S2_A.R
+set.seed(11)
+hm_6w <- make_heatmap_base("6W")
+
+# Top 11 for 6W
+if ("taxon" %in% colnames(hm_6w$res_q)) taxa_s2a <- hm_6w$res_q$taxon[1:11] else taxa_s2a <- rownames(hm_6w$res_q)[1:11]
+
+ps_sig_s2a <- phyloseq::prune_taxa(taxa_s2a, hm_6w$tp_data)
+mat_s2a <- as.matrix(data.frame(phyloseq::otu_table(ps_sig_s2a)))
+
+metadata_s2a <- data.frame(phyloseq::sample_data(ps_sig_s2a))
+ann_col_s2a <- data.frame(BeforeMalaria = as.factor(metadata_s2a$BeforeMalaria), check.names = FALSE)
+rownames(ann_col_s2a) <- rownames(metadata_s2a)
+ann_row_s2a <- data.frame(Phylum = as.factor(phyloseq::tax_table(ps_sig_s2a)[, "Phylum"]))
+rownames(ann_row_s2a) <- rownames(mat_s2a)
+
+phylum_col_s2a <- brewer.pal(length(levels(ann_row_s2a$Phylum)), "Paired")
+names(phylum_col_s2a) <- levels(ann_row_s2a$Phylum)
+
+# Manual fixes before lookup
+rownames(mat_s2a)[grep("haemolyticus", rownames(mat_s2a))] <- "haemolyticus"
+rownames(mat_s2a)[grep("magna", rownames(mat_s2a))] <- "magna"
+
+for (col in 1:ncol(mat_s2a)) colnames(mat_s2a)[col] <- sub("_.*", "", colnames(mat_s2a)[col])
+rownames(mat_s2a) <- hm_6w$lt$SpeciesL[match(rownames(mat_s2a), hm_6w$lt$Species)]
+
+col_fun_s2a <- colorRamp2(c(min(mat_s2a), 1, max(mat_s2a)/2, max(mat_s2a)),
+                            c("white", "#c994c7", "#e7298a", "#67001f"))
+
+draw_hm_s2a <- function() {
+  ComplexHeatmap::pheatmap(mat_s2a, name = "Relative\nAbundance\n(%)",
+    annotation_col = ann_col_s2a, annotation_row = ann_row_s2a,
+    annotation_colors = list(BeforeMalaria = c(Yes = "red", Never = "blue"), Phylum = phylum_col_s2a),
+    col = col_fun_s2a,
+    column_title = "A:  6 Weeks                                                                              \nIndividuals",
+    column_title_gp = gpar(fontsize = 20), row_title = "Taxa", row_title_gp = gpar(fontsize = 20),
+    heatmap_legend_param = list(
+      at = c(min(mat_s2a), 1, max(mat_s2a)/2, max(mat_s2a)),
+      labels = c(round(min(mat_s2a), 2), "1", round(max(mat_s2a)/2), round(max(mat_s2a)))))
+}
+draw(draw_hm_s2a())
+pdf("figures/FigS2A_heatmap_6W.pdf", width = 14, height = 8); draw(draw_hm_s2a()); dev.off()
+png("figures/FigS2A_heatmap_6W.png", width = 4200, height = 2400, res = 300); draw(draw_hm_s2a()); dev.off()
+```
+
+```{r figs2b, fig.cap="ANCOM-BC heatmap: 3 Months."}
+# Faithful reproduction of Figure_S2_B.R
+set.seed(11)
+hm_3m <- make_heatmap_base("3M")
+
+# q < 0.05 for 3M
+sig_rows_s2b <- hm_3m$res_q[hm_3m$res_q[[hm_3m$target_col]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_s2b)) taxa_s2b <- sig_rows_s2b$taxon else taxa_s2b <- rownames(sig_rows_s2b)
+taxa_s2b <- unlist(taxa_s2b)
+
+ps_sig_s2b <- phyloseq::prune_taxa(taxa_s2b, hm_3m$tp_data)
+mat_s2b <- as.matrix(data.frame(phyloseq::otu_table(ps_sig_s2b)))
+
+metadata_s2b <- data.frame(phyloseq::sample_data(ps_sig_s2b))
+ann_col_s2b <- data.frame(BeforeMalaria = as.factor(metadata_s2b$BeforeMalaria), check.names = FALSE)
+rownames(ann_col_s2b) <- rownames(metadata_s2b)
+ann_row_s2b <- data.frame(Phylum = as.factor(phyloseq::tax_table(ps_sig_s2b)[, "Phylum"]))
+rownames(ann_row_s2b) <- rownames(mat_s2b)
+
+phylum_col_s2b <- brewer.pal(length(levels(ann_row_s2b$Phylum)), "Paired")
+names(phylum_col_s2b) <- levels(ann_row_s2b$Phylum)
+
+# Name cleanup via lookup + manual overrides
+new_names_s2b <- hm_3m$lt$SpeciesL[match(rownames(mat_s2b), hm_3m$lt$Species)]
+final_names_s2b <- ifelse(is.na(new_names_s2b), rownames(mat_s2b), new_names_s2b)
+final_names_s2b[grep("haemolyticus", final_names_s2b, ignore.case = TRUE)] <- "S. haemolyticus"
+final_names_s2b[grep("dispar", final_names_s2b, ignore.case = TRUE)] <- "V. dispar"
+final_names_s2b[grep("faecium", final_names_s2b, ignore.case = TRUE)] <- "E. faecium"
+
+for (col in 1:ncol(mat_s2b)) colnames(mat_s2b)[col] <- sub("_.*", "", colnames(mat_s2b)[col])
+rownames(mat_s2b) <- final_names_s2b
+
+col_fun_s2b <- colorRamp2(c(min(mat_s2b), 1, max(mat_s2b)/2, max(mat_s2b)),
+                            c("white", "#c994c7", "#e7298a", "#67001f"))
+
+draw_hm_s2b <- function() {
+  ComplexHeatmap::pheatmap(mat_s2b, name = "Relative\nAbundance\n(%)",
+    annotation_col = ann_col_s2b, annotation_row = ann_row_s2b,
+    annotation_colors = list(BeforeMalaria = c(Yes = "red", Never = "blue"), Phylum = phylum_col_s2b),
+    col = col_fun_s2b,
+    column_title = "B:  3 Months                                                                              \nIndividuals",
+    column_title_gp = gpar(fontsize = 20), row_title = "Taxa", row_title_gp = gpar(fontsize = 20),
+    heatmap_legend_param = list(
+      at = c(min(mat_s2b), 1, max(mat_s2b)/2, max(mat_s2b)),
+      labels = c(round(min(mat_s2b), 2), "1", round(max(mat_s2b)/2), round(max(mat_s2b)))))
+}
+draw(draw_hm_s2b())
+pdf("figures/FigS2B_heatmap_3M.pdf", width = 14, height = 8); draw(draw_hm_s2b()); dev.off()
+png("figures/FigS2B_heatmap_3M.png", width = 4200, height = 2400, res = 300); draw(draw_hm_s2b()); dev.off()
+```
+
+```{r figs2c, fig.cap="ANCOM-BC heatmap: 6 Months."}
+# Faithful reproduction of Figure_S2_C.R
+set.seed(11)
+hm_6m <- make_heatmap_base("6M")
+
+# q < 0.05 for 6M
+sig_rows_s2c <- hm_6m$res_q[hm_6m$res_q[[hm_6m$target_col]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_s2c)) taxa_s2c <- sig_rows_s2c$taxon else taxa_s2c <- rownames(sig_rows_s2c)
+taxa_s2c <- unlist(taxa_s2c)
+
+ps_sig_s2c <- phyloseq::prune_taxa(taxa_s2c, hm_6m$tp_data)
+mat_s2c <- as.matrix(data.frame(phyloseq::otu_table(ps_sig_s2c)))
+
+metadata_s2c <- data.frame(phyloseq::sample_data(ps_sig_s2c))
+ann_col_s2c <- data.frame(BeforeMalaria = as.factor(metadata_s2c$BeforeMalaria), check.names = FALSE)
+rownames(ann_col_s2c) <- rownames(metadata_s2c)
+ann_row_s2c <- data.frame(Phylum = as.factor(phyloseq::tax_table(ps_sig_s2c)[, "Phylum"]))
+rownames(ann_row_s2c) <- rownames(mat_s2c)
+
+phylum_col_s2c <- brewer.pal(length(levels(ann_row_s2c$Phylum)), "Paired")
+names(phylum_col_s2c) <- levels(ann_row_s2c$Phylum)
+
+# Name cleanup via lookup + manual overrides (6M-specific)
+new_names_s2c <- hm_6m$lt$SpeciesL[match(rownames(mat_s2c), hm_6m$lt$Species)]
+final_names_s2c <- ifelse(is.na(new_names_s2c), rownames(mat_s2c), new_names_s2c)
+final_names_s2c[final_names_s2c == "[. faecis"] <- "R. torques"
+final_names_s2c[grep("faecis", final_names_s2c)] <- "R. torques"
+final_names_s2c[final_names_s2c == "[. innocuum"] <- "C. innocuum"
+final_names_s2c[grep("innocuum", final_names_s2c)] <- "C. innocuum"
+final_names_s2c[grep("magna", final_names_s2c, ignore.case = TRUE)] <- "F. magna"
+final_names_s2c[grep("dispar", final_names_s2c, ignore.case = TRUE)] <- "V. dispar"
+
+for (col in 1:ncol(mat_s2c)) colnames(mat_s2c)[col] <- sub("_.*", "", colnames(mat_s2c)[col])
+rownames(mat_s2c) <- final_names_s2c
+
+col_fun_s2c <- colorRamp2(c(min(mat_s2c), 1, max(mat_s2c)/2, max(mat_s2c)),
+                            c("white", "#c994c7", "#e7298a", "#67001f"))
+
+draw_hm_s2c <- function() {
+  ComplexHeatmap::pheatmap(mat_s2c, name = "Relative\nAbundance\n(%)",
+    annotation_col = ann_col_s2c, annotation_row = ann_row_s2c,
+    annotation_colors = list(BeforeMalaria = c(Yes = "red", Never = "blue"), Phylum = phylum_col_s2c),
+    col = col_fun_s2c,
+    column_title = "C:  6 Months                                                                              \nIndividuals",
+    column_title_gp = gpar(fontsize = 20), row_title = "Taxa", row_title_gp = gpar(fontsize = 20),
+    heatmap_legend_param = list(
+      at = c(min(mat_s2c), 1, max(mat_s2c)/2, max(mat_s2c)),
+      labels = c(round(min(mat_s2c), 2), "1", round(max(mat_s2c)/2), round(max(mat_s2c)))))
+}
+draw(draw_hm_s2c())
+pdf("figures/FigS2C_heatmap_6M.pdf", width = 14, height = 8); draw(draw_hm_s2c()); dev.off()
+png("figures/FigS2C_heatmap_6M.png", width = 4200, height = 2400, res = 300); draw(draw_hm_s2c()); dev.off()
+```
+
+```{r figs2d, fig.cap="ANCOM-BC heatmap: 1 Year."}
+# Faithful reproduction of Figure_S2_D.R
+set.seed(11)
+hm_1y <- make_heatmap_base("1Y", group_var = "Malaria",
+                             formula_str = "Malaria + Baby.sex.x + Med_Antibiotic")
+
+# q < 0.05 for 1Y
+sig_rows_s2d <- hm_1y$res_q[hm_1y$res_q[[hm_1y$target_col]] < 0.05, ]
+if ("taxon" %in% colnames(sig_rows_s2d)) taxa_s2d <- sig_rows_s2d$taxon else taxa_s2d <- rownames(sig_rows_s2d)
+taxa_s2d <- unlist(taxa_s2d)
+
+ps_sig_s2d <- phyloseq::prune_taxa(taxa_s2d, hm_1y$tp_data)
+mat_s2d <- as.matrix(data.frame(phyloseq::otu_table(ps_sig_s2d)))
+
+metadata_s2d <- data.frame(phyloseq::sample_data(ps_sig_s2d))
+ann_col_s2d <- data.frame(Malaria = as.factor(metadata_s2d$Malaria), check.names = FALSE)
+rownames(ann_col_s2d) <- rownames(metadata_s2d)
+ann_row_s2d <- data.frame(Phylum = as.factor(phyloseq::tax_table(ps_sig_s2d)[, "Phylum"]))
+rownames(ann_row_s2d) <- rownames(mat_s2d)
+
+phylum_col_s2d <- brewer.pal(length(levels(ann_row_s2d$Phylum)), "Paired")
+names(phylum_col_s2d) <- levels(ann_row_s2d$Phylum)
+
+# Name cleanup via lookup + manual overrides (1Y-specific)
+new_names_s2d <- hm_1y$lt$SpeciesL[match(rownames(mat_s2d), hm_1y$lt$Species)]
+final_names_s2d <- ifelse(is.na(new_names_s2d), rownames(mat_s2d), new_names_s2d)
+final_names_s2d[grep("faecis", final_names_s2d)] <- "R. faecis"
+final_names_s2d[final_names_s2d == "[. lactaris"] <- "R. lactaris"
+final_names_s2d[grep("lactaris", final_names_s2d)] <- "R. lactaris"
+final_names_s2d[grep("finegoldii", final_names_s2d, ignore.case = TRUE)] <- "A. finegoldii"
+
+for (col in 1:ncol(mat_s2d)) colnames(mat_s2d)[col] <- sub("_.*", "", colnames(mat_s2d)[col])
+rownames(mat_s2d) <- final_names_s2d
+
+col_fun_s2d <- colorRamp2(c(min(mat_s2d), 1, max(mat_s2d)/2, max(mat_s2d)),
+                            c("white", "#c994c7", "#e7298a", "#67001f"))
+
+draw_hm_s2d <- function() {
+  ComplexHeatmap::pheatmap(mat_s2d, name = "Relative\nAbundance\n(%)",
+    annotation_col = ann_col_s2d, annotation_row = ann_row_s2d,
+    annotation_colors = list(Malaria = c(Yes = "red", No = "blue"), Phylum = phylum_col_s2d),
+    col = col_fun_s2d,
+    column_title = "D:  1 Year                                                                              \nIndividuals",
+    column_title_gp = gpar(fontsize = 20), row_title = "Taxa", row_title_gp = gpar(fontsize = 20),
+    heatmap_legend_param = list(
+      at = c(min(mat_s2d), 1, max(mat_s2d)/2, max(mat_s2d)),
+      labels = c(round(min(mat_s2d), 2), "1", round(max(mat_s2d)/2), round(max(mat_s2d)))))
+}
+draw(draw_hm_s2d())
+pdf("figures/FigS2D_heatmap_1Y.pdf", width = 14, height = 8); draw(draw_hm_s2d()); dev.off()
+png("figures/FigS2D_heatmap_1Y.png", width = 4200, height = 2400, res = 300); draw(draw_hm_s2d()); dev.off()
+```
+
+
+# Figure 6: Malaria-Induced Dysbiosis
+
+## Figure 6A: PCoA — resistant vs before malaria
+
+```{r fig6a, fig.cap="Beta diversity: resistant vs susceptible (before malaria)."}
+set.seed(11)
+ds6a <- make_clean_meco()
+ds6a$sample_table <- subset(ds6a$sample_table, Type == "sample")
+ds6a$sample_table <- ds6a$sample_table %>% mutate(BeforeMalaria = replace_na(BeforeMalaria, "Never"))
+ds6a$sample_table <- subset(ds6a$sample_table, BeforeMalaria %in% c("Yes", "Never"))
+ds6a$tidy_dataset()
+ds6a$cal_betadiv(unifrac = FALSE)
+
+t6a <- trans_beta$new(dataset = ds6a, group = "BeforeMalaria", measure = "bray")
+t6a$cal_ordination(method = "PCoA")
+p6a <- t6a$plot_ordination(plot_color = "BeforeMalaria", plot_shape = "BeforeMalaria",
+                    plot_type = c("point", "ellipse"),
+                    color_values = c(JulieBlue, JulieRed)) +
+  theme(text = element_text(size = 20))
+print(p6a)
+save_fig(p6a, "Fig6A_PCoA_before_malaria", width = 10, height = 7)
+```
+
+## Figure 6B: PCoA — resistant vs during malaria
+
+```{r fig6b, fig.cap="Beta diversity: resistant vs during malaria."}
+set.seed(11)
+ds6b <- make_clean_meco()
+ds6b$cal_abund(); ds6b$cal_alphadiv(PD = FALSE); ds6b$cal_betadiv(unifrac = FALSE)
+ds6b$sample_table <- subset(ds6b$sample_table, Type == "sample")
+ds6b$sample_table <- ds6b$sample_table %>% mutate(DuringMalaria = replace_na(DuringMalaria, "No"))
+ds6b$tidy_dataset()
+
+t6b <- trans_beta$new(dataset = ds6b, group = "DuringMalaria", measure = "bray")
+t6b$cal_ordination(method = "PCoA")
+p6b <- t6b$plot_ordination(plot_color = "DuringMalaria", plot_shape = "DuringMalaria",
+                    plot_type = c("point", "ellipse"),
+                    color_values = c(JulieBlue, JulieRed)) +
+  theme(text = element_text(size = 20))
+print(p6b)
+save_fig(p6b, "Fig6B_PCoA_during_malaria", width = 10, height = 7)
+```
+
+## Figure 6C: PCoA & Bray-Curtis distance — before vs post malaria
+
+```{r fig6c, fig.cap="Beta diversity and Bray-Curtis distance: before vs post malaria."}
+set.seed(11)
+ds6c <- make_clean_meco()
+ds6c$sample_table <- subset(ds6c$sample_table, BeforeMalaria == "Yes" | PostMalaria == "Yes")
+ds6c$tidy_dataset()
+ds6c$cal_abund(); ds6c$cal_alphadiv(PD = FALSE); ds6c$cal_betadiv(unifrac = FALSE)
+
+# PCoA
+t6c <- trans_beta$new(dataset = ds6c, group = "BeforeMalaria", measure = "bray")
+t6c$cal_ordination(method = "PCoA")
+p6c1 <- t6c$plot_ordination(plot_color = "BeforeMalaria", plot_shape = "BeforeMalaria",
+                             plot_type = c("point", "ellipse"),
+                             color_values = c(JulieBlue, JulieRed)) +
+  theme(text = element_text(size = 20))
+print(p6c1)
+save_fig(p6c1, "Fig6C_PCoA_pre_post_malaria", width = 10, height = 7)
+
+# Group distance
+t6c2 <- trans_beta$new(dataset = ds6c, group = "BeforeMalaria", measure = "bray")
+t6c2$cal_group_distance(within_group = TRUE)
+t6c2$cal_group_distance_diff(method = "wilcox")
+p6c2 <- t6c2$plot_group_distance(boxplot_add = "mean",
+                                  color_values = c(JulieBlue, JulieRed)) +
+  theme(text = element_text(size = 20))
+print(p6c2)
+save_fig(p6c2, "Fig6C_BrayCurtis_distance", width = 8, height = 6)
+```
+
+## Figure 6D: Alpha diversity — before vs post malaria
+
+```{r fig6d, fig.width=8, fig.height=6, fig.cap="Alpha diversity before vs after first malaria infection."}
+set.seed(11)
+ds6d <- make_clean_meco()
+ds6d$sample_table <- subset(ds6d$sample_table, BeforeMalaria == "Yes" | PostMalaria == "Yes")
+ds6d$tidy_dataset()
+ds6d$cal_abund(); ds6d$cal_alphadiv(PD = FALSE)
+
+t6d <- trans_alpha$new(dataset = ds6d, group = "BeforeMalaria")
+t6d$cal_diff(method = "KW")
+
+for (measure in c("Chao1", "Shannon", "Simpson", "Observed")) {
+  p <- t6d$plot_alpha(measure = measure, color_values = c(JulieBlue, JulieRed)) +
+    theme(text = element_text(size = 20))
+  print(p)
+  save_fig(p, paste0("Fig6D_alpha_", measure), width = 8, height = 6)
+}
+```
+
+
+# Supplemental Figure S1: Alpha Diversity by Timepoint
+
+```{r figs1, fig.width=12, fig.height=6, fig.cap="Alpha diversity by malaria status at each timepoint."}
+# Faithful reproduction of Figure_S1.R
+set.seed(11)
+ds_s1 <- make_clean_meco()
+ds_s1$sample_table <- subset(ds_s1$sample_table, 
+                              Time %in% c("6W", "3M", "6M", "1Y") & Type == "sample")
+ds_s1$sample_table$Time <- factor(ds_s1$sample_table$Time, levels = c("6W", "3M", "6M", "1Y"))
+ds_s1$sample_table <- ds_s1$sample_table %>%
+  mutate(Malaria = dplyr::recode(Malaria, "No" = "Resistant", "Yes" = "Susceptible"))
+ds_s1$sample_table$Malaria <- factor(ds_s1$sample_table$Malaria, 
+                                      levels = c("Resistant", "Susceptible"))
+ds_s1$tidy_dataset()
+ds_s1$cal_abund(); ds_s1$cal_alphadiv(PD = FALSE)
+
+t_s1 <- trans_alpha$new(dataset = ds_s1, group = "Malaria")
+t_s1$cal_diff(method = "KW")
+
+# Original .R plots only Simpson with significance annotation
+p_s1 <- t_s1$plot_alpha(
+  measure = "Simpson",
+  plot_type = "ggboxplot",
+  color_values = c(Resistant = JulieBlue, Susceptible = JulieRed),
+  facet = "Time",
+  add_sig = TRUE,
+  add_sig_label = "Significance"
+)
+
+p_s1 <- p_s1 +
+  theme_minimal(base_size = 18) +
+  theme(
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 18),
+    legend.title = element_text(size = 16),
+    strip.text = element_text(size = 18, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold")
+  ) +
+  labs(
+    title = "Alpha Diversity by Malaria Status at Each Timepoint",
+    x = "Malaria Status",
+    y = "Simpson Diversity"
+  )
+print(p_s1)
+save_fig(p_s1, "FigS1_alpha_Simpson", width = 12, height = 6)
+```
+
+
+
+
+# Classifier Analysis (Figures 7, S3)
+
+## Six-Week Model: Training and Selection
+
+This is the verbatim code from `SixWeekModelDetermination.R`.
+
+```{r classifier-6w, cache=TRUE}
+set.seed(123)
+dir.create("SixWeek", showWarnings = FALSE)
+dir.create("SixWeekResults", showWarnings = FALSE)
+
+# Data Preparation — verbatim from SixWeekModelDetermination.R
+# (readRDS replaced with pre-loaded combinedcongo)
+meco_dataset <- phyloseq2meco(combinedcongo)
+meco_dataset$tidy_dataset()
+
+meco_dataset$tax_table <- base::subset(meco_dataset$tax_table, Kingdom %in% c("k__Archaea", "k__Bacteria"))
+meco_dataset$filter_pollution(taxa = c("mitochondria", "chloroplast"))
+st <- subset(meco_dataset$sample_table, Type == "sample")
+st$BeforeMalaria <- as.character(st$BeforeMalaria)
+st$BeforeMalaria[is.na(st$BeforeMalaria)] <- "Never"
+st <- subset(st, BeforeMalaria %in% c("Yes", "Never"))
+st <- subset(st, Time == "6W")
+st$BeforeMalaria <- factor(st$BeforeMalaria, levels = c("Yes", "Never"))
+meco_dataset$sample_table <- st
+meco_dataset$tidy_dataset()
+## --------------------------------------------------------------------
+## 2. Determine Available Taxonomic Levels
+## --------------------------------------------------------------------
+get_available_taxonomic_levels <- function(meco_obj) {
+  # Get all taxonomic columns from tax_table
+  tax_cols <- colnames(meco_obj$tax_table)
+  
+  # Remove 'Taxa' column if it exists (this is typically the row identifier)
+  tax_cols <- tax_cols[tax_cols != "Taxa"]
+  
+  # Common taxonomic level mappings
+  level_mappings <- c(
+    "Kingdom" = "Kingdom",
+    "Phylum" = "Phylum", 
+    "Class" = "Class",
+    "Order" = "Order",
+    "Family" = "Family",
+    "Genus" = "Genus",
+    "Species" = "Species"
+  )
+  
+  # Find which levels are available
+  available_levels <- c()
+  for(level in names(level_mappings)) {
+    if(level %in% tax_cols) {
+      available_levels <- c(available_levels, level)
+    }
+  }
+  
+  # If no standard names found, use all columns except Taxa
+  if(length(available_levels) == 0) {
+    available_levels <- tax_cols
+    cat("Warning: Using all tax_table columns as taxonomic levels\n")
+  }
+  
+  return(available_levels)
+}
+
+# Get available taxonomic levels
+taxonomic_levels <- get_available_taxonomic_levels(meco_dataset)
+cat("Available taxonomic levels:\n")
+cat(paste(taxonomic_levels, collapse = ", "), "\n\n")
+
+## --------------------------------------------------------------------
+## 3. Robust Performance Extraction Function
+## --------------------------------------------------------------------
+extract_microeco_performance <- function(classifier_obj) {
+  results <- list(
+    accuracy = NA,
+    sensitivity = NA,
+    specificity = NA,
+    precision = NA,
+    f1_score = NA,
+    balanced_accuracy = NA,
+    confusion_matrix = NULL,
+    success = FALSE
+  )
+  
+  tryCatch({
+    # Check multiple possible locations for confusion matrix
+    cm <- NULL
+    
+    # Method 1: res_predict$confusionMatrix
+    if(!is.null(classifier_obj$res_predict) && is.list(classifier_obj$res_predict)) {
+      if("confusionMatrix" %in% names(classifier_obj$res_predict)) {
+        cm <- classifier_obj$res_predict$confusionMatrix
+      }
+    }
+    
+    # Method 2: Direct access to confusionMatrix
+    if(is.null(cm) && !is.null(classifier_obj$res_confusion_fit)) {
+      cm <- classifier_obj$res_confusion_fit
+    }
+    
+    # Method 3: Check res_confusion_stats
+    if(is.null(cm) && !is.null(classifier_obj$res_confusion_stats)) {
+      cm <- classifier_obj$res_confusion_stats
+    }
+    
+    if(!is.null(cm)) {
+      # Extract overall metrics
+      if(!is.null(cm$overall) && is.vector(cm$overall)) {
+        if("Accuracy" %in% names(cm$overall)) {
+          results$accuracy <- as.numeric(cm$overall["Accuracy"])
+        }
+      }
+      
+      # Extract by-class metrics
+      if(!is.null(cm$byClass) && is.vector(cm$byClass)) {
+        metric_names <- names(cm$byClass)
+        
+        if("Sensitivity" %in% metric_names) {
+          results$sensitivity <- as.numeric(cm$byClass["Sensitivity"])
+        }
+        if("Specificity" %in% metric_names) {
+          results$specificity <- as.numeric(cm$byClass["Specificity"])
+        }
+        if("Pos Pred Value" %in% metric_names) {
+          results$precision <- as.numeric(cm$byClass["Pos Pred Value"])
+        }
+        if("F1" %in% metric_names) {
+          results$f1_score <- as.numeric(cm$byClass["F1"])
+        }
+        if("Balanced Accuracy" %in% metric_names) {
+          results$balanced_accuracy <- as.numeric(cm$byClass["Balanced Accuracy"])
+        }
+        
+        # Calculate balanced accuracy if not available
+        if(is.na(results$balanced_accuracy) && !is.na(results$sensitivity) && !is.na(results$specificity)) {
+          results$balanced_accuracy <- (results$sensitivity + results$specificity) / 2
+        }
+      }
+      
+      results$confusion_matrix <- cm
+      results$success <- TRUE
+      
+      cat(sprintf("  Performance extracted: Accuracy=%.3f, Sensitivity=%.3f, Specificity=%.3f\n",
+                  ifelse(is.na(results$accuracy), 0, results$accuracy),
+                  ifelse(is.na(results$sensitivity), 0, results$sensitivity),
+                  ifelse(is.na(results$specificity), 0, results$specificity)))
+    } else {
+      cat("  Warning: No confusion matrix found in classifier object\n")
+    }
+    
+  }, error = function(e) {
+    cat(sprintf("  Error extracting performance: %s\n", e$message))
+  })
+  
+  return(results)
+}
+
+## --------------------------------------------------------------------
+## 4. Enhanced Single Classifier Training Function
+## --------------------------------------------------------------------
+train_microeco_classifier <- function(dataset, method_name, method_display_name, 
+                                      taxonomic_level, with_feature_selection = TRUE, verbose = TRUE) {
+  
+  if(verbose) cat(sprintf("\nTraining %s (%s) at %s level%s...\n", 
+                          method_display_name, method_name, taxonomic_level,
+                          ifelse(with_feature_selection, " with Feature Selection", "")))
+  
+  result <- list(
+    method_code = method_name,
+    method_name = method_display_name,
+    taxonomic_level = taxonomic_level,
+    with_fs = with_feature_selection,
+    model = NULL,
+    performance = NULL,
+    success = FALSE,
+    error_message = NULL
+  )
+  
+  tryCatch({
+    # Create classifier
+    classifier <- trans_classifier$new(
+      dataset = dataset, 
+      y.response = "BeforeMalaria", 
+      x.predictors = taxonomic_level  # Now using the specified taxonomic level
+    )
+    
+    # Check if we have enough features to proceed
+    if(!is.null(classifier$data_feature)) {
+      initial_feature_count <- ncol(classifier$data_feature)
+      if(verbose) cat(sprintf("  Available features at %s level: %d\n", taxonomic_level, initial_feature_count))
+      
+      # Skip if too few features for meaningful analysis
+      if(initial_feature_count < 2) {
+        stop(sprintf("Insufficient features (%d) at %s level for classification", initial_feature_count, taxonomic_level))
+      }
+    }
+    
+    # Split data
+    classifier$cal_split(prop.train = 3/4)
+    
+    # Feature selection if requested
+    if(with_feature_selection) {
+      # Check number of features available
+      initial_features <- ncol(classifier$data_feature)
+      if(verbose) cat(sprintf("  Initial features available: %d\n", initial_features))
+      
+      # Skip feature selection if too few features
+      if(initial_features <= 3) {
+        if(verbose) cat(sprintf("  Skipping feature selection (only %d features available)\n", initial_features))
+      } else {
+        classifier$cal_feature_sel(boruta.maxRuns = 200, boruta.pValue = 0.01)
+        
+        # Check if any features were selected
+        remaining_features <- ncol(classifier$data_train)
+        if(verbose) cat(sprintf("  Features after selection: %d\n", remaining_features))
+        
+        # If no features selected, skip this model
+        if(remaining_features == 0) {
+          stop("No features selected by Boruta - model cannot be trained")
+        }
+      }
+    }
+    
+    # Set training control
+    classifier$set_trainControl(method = "cv", number = 5, savePredictions = TRUE, classProbs = TRUE)
+    
+    # Train model with method-specific parameters
+    if(method_name == "rf") {
+      classifier$cal_train(method = "rf")
+    } else if(method_name == "svmRadial") {
+      classifier$cal_train(method = "svmRadial", tuneLength = 5)
+    } else if(method_name == "svmLinear") {
+      classifier$cal_train(method = "svmLinear", tuneLength = 3)
+    } else if(method_name == "glm") {
+      classifier$cal_train(method = "glm")
+    } else if(method_name == "knn") {
+      classifier$cal_train(method = "knn", tuneGrid = expand.grid(k = c(3, 5, 7)))
+    } else if(method_name == "nb") {
+      classifier$cal_train(method = "nb")
+    } else {
+      classifier$cal_train(method = method_name)
+    }
+    
+    # Make predictions
+    classifier$cal_predict()
+    
+    # Calculate ROC (optional, with error handling)
+    tryCatch({
+      classifier$cal_ROC()
+    }, error = function(e) {
+      if(verbose) cat(sprintf("  Note: ROC calculation failed: %s\n", e$message))
+    })
+    
+    # Store model
+    result$model <- classifier
+    
+    # Extract performance
+    performance <- extract_microeco_performance(classifier)
+    result$performance <- performance
+    result$success <- performance$success
+    
+    if(result$success) {
+      if(verbose) cat(sprintf("[OK] %s (%s) training completed successfully\n", method_display_name, taxonomic_level))
+    } else {
+      if(verbose) cat(sprintf("[WARNING] %s (%s) training completed but performance extraction failed\n", method_display_name, taxonomic_level))
+    }
+    
+  }, error = function(e) {
+    result$error_message <- e$message
+    if(verbose) cat(sprintf("[FAIL] Error training %s (%s): %s\n", method_display_name, taxonomic_level, e$message))
+  })
+  
+  return(result)
+}
+
+## --------------------------------------------------------------------
+## 5. Main Analysis Pipeline
+## --------------------------------------------------------------------
+cat("\n=== COMPREHENSIVE MULTI-TAXONOMIC MICROECO CLASSIFIER ANALYSIS ===\n")
+cat("Dataset info:\n")
+cat(sprintf("- Total samples: %d\n", nrow(meco_dataset$sample_table)))
+cat(sprintf("- Response variable levels: %s\n", paste(levels(meco_dataset$sample_table$BeforeMalaria), collapse = ", ")))
+cat(sprintf("- Total features available: %d\n", nrow(meco_dataset$otu_table)))
+cat(sprintf("- Taxonomic levels to analyze: %s\n", paste(taxonomic_levels, collapse = ", ")))
+
+# Define methods to test
+methods_to_test <- list(
+  "rf" = "Random Forest",
+  "svmRadial" = "SVM (Radial Kernel)",
+  "svmLinear" = "SVM (Linear Kernel)", 
+  "glm" = "Logistic Regression",
+  "knn" = "k-Nearest Neighbors",
+  "nb" = "Naive Bayes"
+)
+
+# Storage for all results
+all_results <- list()
+
+## --------------------------------------------------------------------
+## 6. Run All Classifiers for All Taxonomic Levels
+## --------------------------------------------------------------------
+cat("\n=== TRAINING ALL CLASSIFIERS ACROSS ALL TAXONOMIC LEVELS ===\n")
+
+total_combinations <- length(taxonomic_levels) * length(methods_to_test) * 2  # *2 for with/without FS
+current_combination <- 0
+
+for(tax_level in taxonomic_levels) {
+  cat(sprintf("\n--- ANALYZING TAXONOMIC LEVEL: %s ---\n", tax_level))
+  
+  # Quick check of feature availability at this level
+  tryCatch({
+    temp_classifier <- trans_classifier$new(
+      dataset = meco_dataset, 
+      y.response = "BeforeMalaria", 
+      x.predictors = tax_level
+    )
+    feature_count <- ncol(temp_classifier$data_feature)
+    cat(sprintf("Features available at %s level: %d\n", tax_level, feature_count))
+    
+    if(feature_count < 2) {
+      cat(sprintf("[WARNING] Skipping %s level - insufficient features for classification\n", tax_level))
+      # Still increment counters to maintain progress tracking
+      current_combination <- current_combination + (length(methods_to_test) * 2)
+      next
+    }
+    
+  }, error = function(e) {
+    cat(sprintf("[WARNING] Error checking %s level: %s\n", tax_level, e$message))
+    current_combination <- current_combination + (length(methods_to_test) * 2)
+    next
+  })
+  
+  for(method_code in names(methods_to_test)) {
+    method_name <- methods_to_test[[method_code]]
+    
+    # With feature selection
+    current_combination <- current_combination + 1
+    cat(sprintf("\n[%d/%d] ", current_combination, total_combinations))
+    
+    result_with_fs <- train_microeco_classifier(
+      dataset = meco_dataset,
+      method_name = method_code,
+      method_display_name = method_name,
+      taxonomic_level = tax_level,
+      with_feature_selection = TRUE
+    )
+    all_results[[paste0(tax_level, "_", method_code, "_with_fs")]] <- result_with_fs
+    
+    # Without feature selection
+    current_combination <- current_combination + 1
+    cat(sprintf("\n[%d/%d] ", current_combination, total_combinations))
+    
+    result_without_fs <- train_microeco_classifier(
+      dataset = meco_dataset,
+      method_name = method_code,
+      method_display_name = method_name,
+      taxonomic_level = tax_level,
+      with_feature_selection = FALSE
+    )
+    all_results[[paste0(tax_level, "_", method_code, "_without_fs")]] <- result_without_fs
+    
+    # Brief pause
+    Sys.sleep(1)
+  }
+}
+
+## --------------------------------------------------------------------
+## 7. Create Comprehensive Results Summary
+## --------------------------------------------------------------------
+cat("\n=== CREATING RESULTS SUMMARY ===\n")
+
+create_results_dataframe <- function(results_list) {
+  df <- data.frame(
+    Taxonomic_Level = character(),
+    Method = character(),
+    Feature_Selection = character(),
+    Success = logical(),
+    Accuracy = numeric(),
+    Sensitivity = numeric(),
+    Specificity = numeric(),
+    Precision = numeric(),
+    F1_Score = numeric(),
+    Balanced_Accuracy = numeric(),
+    Error_Message = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for(result_name in names(results_list)) {
+    result <- results_list[[result_name]]
+    
+    # Extract performance metrics
+    acc <- ifelse(!is.null(result$performance) && !is.na(result$performance$accuracy), 
+                  result$performance$accuracy, 0)
+    sens <- ifelse(!is.null(result$performance) && !is.na(result$performance$sensitivity), 
+                   result$performance$sensitivity, 0)
+    spec <- ifelse(!is.null(result$performance) && !is.na(result$performance$specificity), 
+                   result$performance$specificity, 0)
+    prec <- ifelse(!is.null(result$performance) && !is.na(result$performance$precision), 
+                   result$performance$precision, 0)
+    f1 <- ifelse(!is.null(result$performance) && !is.na(result$performance$f1_score), 
+                 result$performance$f1_score, 0)
+    bal_acc <- ifelse(!is.null(result$performance) && !is.na(result$performance$balanced_accuracy), 
+                      result$performance$balanced_accuracy, 0)
+    
+    df <- rbind(df, data.frame(
+      Taxonomic_Level = result$taxonomic_level,
+      Method = result$method_name,
+      Feature_Selection = ifelse(result$with_fs, "With FS", "Without FS"),
+      Success = result$success,
+      Accuracy = acc,
+      Sensitivity = sens,
+      Specificity = spec,
+      Precision = prec,
+      F1_Score = f1,
+      Balanced_Accuracy = bal_acc,
+      Error_Message = ifelse(is.null(result$error_message), "", result$error_message),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  return(df)
+}
+
+# Create summary dataframe
+results_summary <- create_results_dataframe(all_results)
+
+# Print summary by taxonomic level
+cat("\n=== PERFORMANCE SUMMARY BY TAXONOMIC LEVEL ===\n")
+for(tax_level in taxonomic_levels) {
+  cat(sprintf("\n--- %s Level ---\n", tax_level))
+  level_results <- results_summary[results_summary$Taxonomic_Level == tax_level, ]
+  print(level_results[, c("Method", "Feature_Selection", "Success", "Accuracy", "Sensitivity", "Specificity", "Balanced_Accuracy")])
+}
+
+## --------------------------------------------------------------------
+## 8. Identify Best Models
+## --------------------------------------------------------------------
+cat("\n=== BEST MODEL IDENTIFICATION ===\n")
+
+successful_results <- results_summary[results_summary$Success == TRUE, ]
+
+if(nrow(successful_results) > 0) {
+  # Sort by balanced accuracy
+  successful_results <- successful_results[order(successful_results$Balanced_Accuracy, decreasing = TRUE), ]
+  
+  cat("Top 10 performing models across all taxonomic levels:\n")
+  top_n <- min(10, nrow(successful_results))
+  for(i in 1:top_n) {
+    cat(sprintf("%d. %s - %s (%s): Balanced Accuracy = %.3f, Accuracy = %.3f\n", 
+                i, 
+                successful_results$Taxonomic_Level[i],
+                successful_results$Method[i],
+                successful_results$Feature_Selection[i],
+                successful_results$Balanced_Accuracy[i],
+                successful_results$Accuracy[i]))
+  }
+  
+  # Best overall model
+  best_model <- successful_results[1, ]
+  cat(sprintf("\n>>> BEST OVERALL MODEL: %s - %s (%s)\n", 
+              best_model$Taxonomic_Level, best_model$Method, best_model$Feature_Selection))
+  cat(sprintf("   Performance: Accuracy=%.3f, Sensitivity=%.3f, Specificity=%.3f, Balanced Accuracy=%.3f\n",
+              best_model$Accuracy, best_model$Sensitivity, best_model$Specificity, best_model$Balanced_Accuracy))
+  
+  # Best model for each taxonomic level
+  cat("\n=== BEST MODEL PER TAXONOMIC LEVEL ===\n")
+  for(tax_level in taxonomic_levels) {
+    level_results <- successful_results[successful_results$Taxonomic_Level == tax_level, ]
+    if(nrow(level_results) > 0) {
+      best_for_level <- level_results[1, ]
+      cat(sprintf("%s: %s (%s) - Balanced Accuracy = %.3f\n",
+                  tax_level, best_for_level$Method, best_for_level$Feature_Selection, 
+                  best_for_level$Balanced_Accuracy))
+    } else {
+      cat(sprintf("%s: No successful models\n", tax_level))
+    }
+  }
+  
+} else {
+  cat("[WARNING] No successful models found. Check for errors in the analysis.\n")
+}
+
+## --------------------------------------------------------------------
+## 9. Generate Enhanced Visualizations
+## --------------------------------------------------------------------
+cat("\n=== GENERATING VISUALIZATIONS ===\n")
+
+if(nrow(successful_results) > 0) {
+  
+  # Performance comparison plot by taxonomic level
+  library(reshape2)
+  plot_data <- successful_results[, c("Taxonomic_Level", "Method", "Feature_Selection", "Accuracy", "Sensitivity", "Specificity", "Balanced_Accuracy")]
+  melted_data <- melt(plot_data, id.vars = c("Taxonomic_Level", "Method", "Feature_Selection"))
+  
+  performance_plot <- ggplot(melted_data, aes(x = Method, y = value, fill = Feature_Selection)) +
+    geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+    facet_grid(variable ~ Taxonomic_Level, scales = "free_y") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          strip.text = element_text(size = 9)) +
+    labs(title = "Classifier Performance Across All Taxonomic Levels",
+         subtitle = sprintf("Analysis of %d samples with %s outcome classification", 
+                            nrow(meco_dataset$sample_table),
+                            paste(levels(meco_dataset$sample_table$BeforeMalaria), collapse = " vs ")),
+         x = "Classification Method",
+         y = "Performance Metric",
+         fill = "Feature Selection") +
+    scale_fill_manual(values = c("With FS" = "#2E86C1", "Without FS" = "#E74C3C")) +
+    ylim(0, 1)
+  
+  ggsave("SixWeek/SixWeekmicrobiome_multi_taxonomic_performance.pdf", performance_plot, width = 20, height = 12, dpi = 300)
+  cat("[OK] Multi-taxonomic performance comparison plot saved to SixWeek folder\n")
+  
+  # Summary heatmap showing best performance per taxonomic level
+  summary_for_heatmap <- successful_results %>%
+    group_by(Taxonomic_Level, Method) %>%
+    summarise(Best_Balanced_Accuracy = max(Balanced_Accuracy), .groups = 'drop')
+  
+  heatmap_plot <- ggplot(summary_for_heatmap, aes(x = Method, y = Taxonomic_Level, fill = Best_Balanced_Accuracy)) +
+    geom_tile(color = "white", size = 0.5) +
+    geom_text(aes(label = sprintf("%.3f", Best_Balanced_Accuracy)), color = "white", fontface = "bold") +
+    scale_fill_gradient2(low = "#E74C3C", mid = "#F39C12", high = "#27AE60", 
+                         midpoint = 0.6, name = "Balanced\nAccuracy") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Best Performance Heatmap by Taxonomic Level and Method",
+         subtitle = "Values shown are best balanced accuracy (with or without feature selection)",
+         x = "Classification Method",
+         y = "Taxonomic Level")
+  
+  ggsave("SixWeek/SixWeekmicrobiome_performance_heatmap.pdf", heatmap_plot, width = 12, height = 8, dpi = 300)
+  cat("[OK] Performance heatmap saved to SixWeek folder\n")
+  
+}
+
+## --------------------------------------------------------------------
+## 10. Save All Results
+## --------------------------------------------------------------------
+cat("\n=== SAVING RESULTS ===\n")
+
+# Save summary table to SixWeek folder
+write.csv(results_summary, "SixWeek/SixWeekmicrobiome_multi_taxonomic_results.csv", row.names = FALSE)
+cat("[OK] Results summary saved to SixWeek folder\n")
+
+# Save R workspace to root folder
+save(all_results, results_summary, meco_dataset, successful_results, taxonomic_levels,
+     file = "SixWeekmicrobiome_multi_taxonomic_analysis.RData")
+cat("[OK] Complete analysis saved as RData file in root folder\n")
+
+## --------------------------------------------------------------------
+## 11. Final Summary Report
+## --------------------------------------------------------------------
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("MULTI-TAXONOMIC MICROBIOME CLASSIFICATION ANALYSIS - FINAL REPORT\n")
+cat(paste(rep("=", 80), collapse = ""), "\n")
+
+cat(sprintf("Dataset: Congo Malaria Microbiome Study\n"))
+cat(sprintf("Target Variable: Before Malaria (Yes/Never)\n"))
+cat(sprintf("Total Samples: %d\n", nrow(meco_dataset$sample_table)))
+cat(sprintf("Taxonomic Levels Analyzed: %s\n", paste(taxonomic_levels, collapse = ", ")))
+cat(sprintf("Feature Selection: Boruta Algorithm\n"))
+cat(sprintf("Cross-Validation: 5-fold CV\n\n"))
+
+cat(sprintf("Total Models Trained: %d\n", length(all_results)))
+cat(sprintf("Models per Taxonomic Level: %d (%d with FS, %d without FS)\n", 
+            length(methods_to_test) * 2,
+            length(methods_to_test), 
+            length(methods_to_test)))
+
+cat(sprintf("Successful Models: %d\n", nrow(successful_results)))
+cat(sprintf("Failed Models: %d\n", length(all_results) - nrow(successful_results)))
+
+if(nrow(successful_results) > 0) {
+  cat(sprintf("\nBest Overall Model: %s - %s (%s)\n", 
+              best_model$Taxonomic_Level, best_model$Method, best_model$Feature_Selection))
+  cat(sprintf("Best Model Accuracy: %.1f%%\n", best_model$Accuracy * 100))
+  cat(sprintf("Best Model Balanced Accuracy: %.1f%%\n", best_model$Balanced_Accuracy * 100))
+  
+  # Performance interpretation
+  if(best_model$Balanced_Accuracy > 0.75) {
+    interpretation <- "Excellent predictive performance - strong microbiome signal for malaria history"
+  } else if(best_model$Balanced_Accuracy > 0.65) {
+    interpretation <- "Good predictive performance - moderate microbiome signal detected"
+  } else if(best_model$Balanced_Accuracy > 0.55) {
+    interpretation <- "Moderate predictive performance - weak but detectable microbiome signal"
+  } else {
+    interpretation <- "Limited predictive performance - microbiome signal for malaria history is weak"
+  }
+  
+  cat(sprintf("\nInterpretation: %s\n", interpretation))
+  
+  # Taxonomic level analysis
+  cat(sprintf("\nTaxonomic Level Performance Summary:\n"))
+  for(tax_level in taxonomic_levels) {
+    level_results <- successful_results[successful_results$Taxonomic_Level == tax_level, ]
+    if(nrow(level_results) > 0) {
+      avg_performance <- mean(level_results$Balanced_Accuracy)
+      best_performance <- max(level_results$Balanced_Accuracy)
+      cat(sprintf("- %s: Avg=%.3f, Best=%.3f (%d successful models)\n", 
+                  tax_level, avg_performance, best_performance, nrow(level_results)))
+    } else {
+      cat(sprintf("- %s: No successful models\n", tax_level))
+    }
+  }
+}
+
+cat("\nGenerated Files:\n")
+cat("=== SixWeek Folder ===\n")
+cat("- SixWeekmicrobiome_multi_taxonomic_results.csv: Detailed performance metrics\n")
+cat("- SixWeekmicrobiome_multi_taxonomic_performance.pdf: Performance comparison plot\n")
+cat("- SixWeekmicrobiome_performance_heatmap.pdf: Summary heatmap\n")
+cat("\n=== Root Folder ===\n")
+cat("- SixWeekmicrobiome_multi_taxonomic_analysis.RData: Complete R workspace\n")
+
+```
+
+
+## Six-Week Model: Extraction and Visualization (Figures 7A-B, S3)
+
+Verbatim from `SixWeekModelExtractionAndVisualization.R`. Objects
+`all_results`, `results_summary`, `successful_results`, `meco_dataset`,
+and `taxonomic_levels` carry over from the previous chunk.
+
+```{r classifier-6w-extract, cache=TRUE, fig.width=12, fig.height=8}
+library(gridExtra)
+library(viridis)
+library(pheatmap)
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+## --------------------------------------------------------------------
+## 1. Load Results and Identify Best Model
+## --------------------------------------------------------------------
+cat("=== LOADING RESULTS ===\n")
+
+# Check if results are already loaded
+if(!exists("all_results") || !exists("results_summary")) {
+  if(file.exists("SixWeekmicrobiome_multi_taxonomic_analysis.RData")) {
+    load("SixWeekmicrobiome_multi_taxonomic_analysis.RData")
+    cat("[OK] Loaded results from RData file\n")
+  } else if(file.exists("microbiome_multi_taxonomic_analysis.RData")) {
+    load("microbiome_multi_taxonomic_analysis.RData")
+    cat("[OK] Loaded results from RData file\n")
+  } else {
+    stop("[ERROR] Could not find results. Please run the main analysis first or check file path.")
+  }
+}
+
+# Robust function to find best overall model
+find_best_overall_model <- function(results_list, results_df) {
+  cat("Searching for best overall model...\n")
+  
+  # Print available methods for debugging
+  cat("Available methods in results:\n")
+  print(unique(results_df$Method))
+  
+  # Find all successful models (both with and without feature selection)
+  successful_models <- results_df[results_df$Success == TRUE, ]
+  
+  if(nrow(successful_models) == 0) {
+    stop("[ERROR] No successful models found")
+  }
+  
+  cat(sprintf("Found %d successful models\n", nrow(successful_models)))
+  
+  # Show top 10 models for reference
+  top_models <- successful_models[order(successful_models$Balanced_Accuracy, decreasing = TRUE), ][1:min(10, nrow(successful_models)), ]
+  cat("Top 10 performing models:\n")
+  print(top_models[, c("Taxonomic_Level", "Method", "Feature_Selection", "Balanced_Accuracy")])
+  
+  # Get the best performing one overall
+  best_model <- successful_models[which.max(successful_models$Balanced_Accuracy), ]
+  cat(sprintf("[OK] Best overall model: %s (%s) at %s level (Balanced Accuracy: %.3f)\n", 
+              best_model$Method, best_model$Feature_Selection, best_model$Taxonomic_Level, best_model$Balanced_Accuracy))
+  
+  # Find the corresponding model object - try multiple naming conventions
+  method_clean <- gsub("[^a-zA-Z]", "", best_model$Method)
+  fs_suffix <- ifelse(best_model$Feature_Selection == "With FS", "with_fs", "without_fs")
+  
+  possible_keys <- c(
+    paste0(best_model$Taxonomic_Level, "_", tolower(method_clean), "_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_svmRadial_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_rf_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_glm_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_knn_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_nb_", fs_suffix),
+    paste0(best_model$Taxonomic_Level, "_svmLinear_", fs_suffix)
+  )
+  
+  model_obj <- NULL
+  model_key <- NULL
+  
+  for(key in possible_keys) {
+    if(key %in% names(results_list)) {
+      model_obj <- results_list[[key]]
+      model_key <- key
+      cat(sprintf("[OK] Found model object with key: %s\n", key))
+      break
+    }
+  }
+  
+  if(is.null(model_obj)) {
+    cat("Available model keys (first 20):\n")
+    cat(paste(head(names(results_list), 20), collapse = ", "), "...\n")
+    
+    # Try a more flexible search
+    cat("Trying flexible search...\n")
+    tax_level <- best_model$Taxonomic_Level
+    matching_keys <- names(results_list)[grepl(tax_level, names(results_list))]
+    cat(sprintf("Keys containing '%s': %s\n", tax_level, paste(head(matching_keys, 10), collapse = ", ")))
+    
+    # If still not found, try the first matching key
+    if(length(matching_keys) > 0) {
+      model_obj <- results_list[[matching_keys[1]]]
+      model_key <- matching_keys[1]
+      cat(sprintf("[WARNING] Using first matching key: %s\n", model_key))
+    } else {
+      stop("[ERROR] Could not find the model object for best model")
+    }
+  }
+  
+  return(list(
+    best_result = best_model,
+    model_object = model_obj,
+    model_key = model_key
+  ))
+}
+
+best_model_info <- find_best_overall_model(all_results, results_summary)
+best_model_result <- best_model_info$best_result
+
+# Verify we have the right model information
+if(is.null(best_model_info$best_result)) {
+  stop("[ERROR] Failed to identify best model")
+}
+
+cat(sprintf("[OK] Using best model: %s (%s) at %s level\n", 
+            best_model_info$best_result$Method,
+            best_model_info$best_result$Feature_Selection,
+            best_model_info$best_result$Taxonomic_Level))
+
+cat("\n=== BEST OVERALL MODEL INFORMATION ===\n")
+cat(sprintf("Taxonomic Level: %s\n", best_model_result$Taxonomic_Level))
+cat(sprintf("Method: %s\n", best_model_result$Method))
+cat(sprintf("Feature Selection: %s\n", best_model_result$Feature_Selection))
+cat(sprintf("Balanced Accuracy: %.3f\n", best_model_result$Balanced_Accuracy))
+cat(sprintf("Accuracy: %.3f\n", best_model_result$Accuracy))
+cat(sprintf("Sensitivity: %.3f\n", best_model_result$Sensitivity))
+cat(sprintf("Specificity: %.3f\n", best_model_result$Specificity))
+
+## --------------------------------------------------------------------
+## 2. Extract Feature Data and Model Information (Robust)
+## --------------------------------------------------------------------
+cat("\n=== EXTRACTING MODEL DATA ===\n")
+
+# Get the classifier object
+model_obj <- best_model_info$model_object
+cat("Model object structure:\n")
+cat(sprintf("- Class: %s\n", class(model_obj)))
+cat(sprintf("- Names: %s\n", paste(names(model_obj), collapse = ", ")))
+
+# Try to get the classifier
+classifier <- NULL
+if(!is.null(model_obj$model)) {
+  classifier <- model_obj$model
+} else if(!is.null(model_obj$classifier)) {
+  classifier <- model_obj$classifier
+} else {
+  classifier <- model_obj
+}
+
+cat("Classifier object structure:\n")
+cat(sprintf("- Class: %s\n", class(classifier)))
+cat(sprintf("- Names: %s\n", paste(names(classifier), collapse = ", ")))
+
+# Extract feature matrix with multiple fallback options
+feature_matrix <- NULL
+response_var <- NULL
+
+# Try different data locations
+data_locations <- list(
+  list(features = "data_feature", response = "data_response"),
+  list(features = "data_train", response = "data_train_y"),
+  list(features = "x_train", response = "y_train"),
+  list(features = "train_x", response = "train_y")
+)
+
+for(location in data_locations) {
+  if(!is.null(classifier[[location$features]]) && !is.null(classifier[[location$response]])) {
+    feature_matrix <- as.matrix(classifier[[location$features]])
+    response_var <- classifier[[location$response]]
+    cat(sprintf("[OK] Found data at: %s & %s\n", location$features, location$response))
+    break
+  }
+}
+
+# If still no data found, try to extract from the original dataset
+if(is.null(feature_matrix) || is.null(response_var)) {
+  cat("Trying to extract from original dataset...\n")
+  
+  if(exists("meco_dataset")) {
+    # Recreate the feature matrix from the original data
+    tax_level <- best_model_result$Taxonomic_Level
+    
+    # Try to recreate classifier to get the data
+    tryCatch({
+      temp_classifier <- trans_classifier$new(
+        dataset = meco_dataset, 
+        y.response = "BeforeMalaria", 
+        x.predictors = tax_level
+      )
+      temp_classifier$cal_split(prop.train = 3/4)
+      
+      # Use all data (train + test)
+      feature_matrix <- rbind(temp_classifier$data_train, temp_classifier$data_test %||% data.frame())
+      response_var <- c(temp_classifier$data_train_y, temp_classifier$data_test_y %||% factor())
+      
+      cat("[OK] Recreated feature matrix from original dataset\n")
+    }, error = function(e) {
+      cat(sprintf("[ERROR] Failed to recreate data: %s\n", e$message))
+    })
+  }
+}
+
+if(is.null(feature_matrix) || is.null(response_var)) {
+  stop("[ERROR] Cannot extract feature matrix and response variable")
+}
+
+# Clean and validate data
+feature_matrix <- as.matrix(feature_matrix)
+response_var <- as.factor(response_var)
+
+cat(sprintf("[OK] Feature matrix: %d samples × %d features\n", nrow(feature_matrix), ncol(feature_matrix)))
+cat(sprintf("[OK] Response levels: %s\n", paste(levels(response_var), collapse = ", ")))
+
+## --------------------------------------------------------------------
+## 3. Simple Feature Importance Methods
+## --------------------------------------------------------------------
+
+# Method 1: Correlation-based importance (Always works)
+calculate_correlation_importance <- function(feature_matrix, response_var) {
+  cat("Calculating correlation-based feature importance...\n")
+  
+  # Convert response to numeric
+  response_numeric <- as.numeric(response_var) - 1
+  
+  # Calculate correlations
+  correlations <- apply(feature_matrix, 2, function(x) {
+    cor(x, response_numeric, use = "complete.obs")
+  })
+  
+  # Remove any NA correlations
+  correlations[is.na(correlations)] <- 0
+  
+  importance_df <- data.frame(
+    Feature = names(correlations),
+    Correlation = abs(correlations),
+    Raw_Correlation = correlations,
+    Importance = abs(correlations),  # Use absolute correlation as importance
+    stringsAsFactors = FALSE
+  )
+  
+  importance_df <- importance_df[order(importance_df$Importance, decreasing = TRUE), ]
+  
+  cat(sprintf("[OK] Calculated correlations for %d features\n", nrow(importance_df)))
+  return(importance_df)
+}
+
+# Method 2: Variance-based importance
+calculate_variance_importance <- function(feature_matrix, response_var) {
+  cat("Calculating variance-based feature importance...\n")
+  
+  groups <- levels(response_var)
+  group1_idx <- which(response_var == groups[1])
+  group2_idx <- which(response_var == groups[2])
+  
+  variance_ratios <- apply(feature_matrix, 2, function(x) {
+    var1 <- var(x[group1_idx], na.rm = TRUE)
+    var2 <- var(x[group2_idx], na.rm = TRUE)
+    mean1 <- mean(x[group1_idx], na.rm = TRUE)
+    mean2 <- mean(x[group2_idx], na.rm = TRUE)
+    
+    # Calculate effect size (Cohen's d)
+    pooled_sd <- sqrt(((length(group1_idx) - 1) * var1 + (length(group2_idx) - 1) * var2) / 
+                        (length(group1_idx) + length(group2_idx) - 2))
+    effect_size <- abs(mean1 - mean2) / pooled_sd
+    
+    return(effect_size)
+  })
+  
+  variance_ratios[is.na(variance_ratios)] <- 0
+  
+  variance_df <- data.frame(
+    Feature = names(variance_ratios),
+    Effect_Size = variance_ratios,
+    stringsAsFactors = FALSE
+  )
+  
+  variance_df <- variance_df[order(variance_df$Effect_Size, decreasing = TRUE), ]
+  
+  cat(sprintf("[OK] Calculated effect sizes for %d features\n", nrow(variance_df)))
+  return(variance_df)
+}
+
+# Method 3: Wilcoxon test-based importance
+calculate_wilcoxon_importance <- function(feature_matrix, response_var) {
+  cat("Calculating Wilcoxon test-based feature importance...\n")
+  
+  groups <- levels(response_var)
+  group1_idx <- which(response_var == groups[1])
+  group2_idx <- which(response_var == groups[2])
+  
+  wilcox_results <- apply(feature_matrix, 2, function(x) {
+    tryCatch({
+      test_result <- wilcox.test(x[group1_idx], x[group2_idx])
+      # Use -log10(p-value) as importance, capped at 10
+      importance <- min(-log10(test_result$p.value + 1e-10), 10)
+      return(c(p_value = test_result$p.value, importance = importance))
+    }, error = function(e) {
+      return(c(p_value = 1, importance = 0))
+    })
+  })
+  
+  wilcox_df <- data.frame(
+    Feature = colnames(feature_matrix),
+    P_Value = wilcox_results[1, ],
+    Wilcox_Importance = wilcox_results[2, ],
+    stringsAsFactors = FALSE
+  )
+  
+  wilcox_df <- wilcox_df[order(wilcox_df$Wilcox_Importance, decreasing = TRUE), ]
+  
+  cat(sprintf("[OK] Calculated Wilcoxon importance for %d features\n", nrow(wilcox_df)))
+  return(wilcox_df)
+}
+
+## --------------------------------------------------------------------
+## 4. Run Feature Importance Analyses
+## --------------------------------------------------------------------
+cat("\n=== CALCULATING FEATURE IMPORTANCE ===\n")
+
+# Calculate all importance measures
+correlation_importance <- calculate_correlation_importance(feature_matrix, response_var)
+variance_importance <- calculate_variance_importance(feature_matrix, response_var)
+wilcoxon_importance <- calculate_wilcoxon_importance(feature_matrix, response_var)
+
+# Combine all measures
+combined_importance <- correlation_importance
+combined_importance <- merge(combined_importance, variance_importance, by = "Feature", all.x = TRUE)
+combined_importance <- merge(combined_importance, wilcoxon_importance, by = "Feature", all.x = TRUE)
+
+# Create composite score
+combined_importance$Composite_Score <- 
+  scale(combined_importance$Importance)[,1] + 
+  scale(combined_importance$Effect_Size)[,1] + 
+  scale(combined_importance$Wilcox_Importance)[,1]
+
+combined_importance <- combined_importance[order(combined_importance$Composite_Score, decreasing = TRUE), ]
+
+# Select top features
+top_n_features <- min(20, nrow(combined_importance))
+top_features <- combined_importance[1:top_n_features, ]
+
+cat(sprintf("\n=== TOP %d MOST IMPORTANT FEATURES ===\n", top_n_features))
+print(top_features[1:min(10, nrow(top_features)), 
+                   c("Feature", "Importance", "Effect_Size", "P_Value", "Composite_Score")])
+
+## --------------------------------------------------------------------
+## 5. Create Visualizations
+## --------------------------------------------------------------------
+cat("\n=== CREATING VISUALIZATIONS ===\n")
+
+# Create output directory
+dir.create("SixWeekResults", showWarnings = FALSE)
+
+# Figure 1: Feature Importance Plot
+create_importance_plot <- function(importance_data, top_n = 15) {
+  plot_data <- importance_data[1:min(top_n, nrow(importance_data)), ]
+  
+  # Clean feature names
+  plot_data$Feature_Clean <- gsub(".*__", "", plot_data$Feature)
+  plot_data$Feature_Clean <- gsub("_", " ", plot_data$Feature_Clean)
+  
+  # Create significance categories
+  plot_data$Significance <- ifelse(plot_data$P_Value < 0.001, "p < 0.001",
+                                   ifelse(plot_data$P_Value < 0.01, "p < 0.01",
+                                          ifelse(plot_data$P_Value < 0.05, "p < 0.05", "p ≥ 0.05")))
+  
+  p1 <- ggplot(plot_data, aes(x = reorder(Feature_Clean, Composite_Score), y = Composite_Score)) +
+    geom_col(aes(fill = Significance), alpha = 0.8, width = 0.7) +
+    coord_flip() +
+    scale_fill_manual(values = c("p < 0.001" = "#E74C3C", "p < 0.01" = "#F39C12", 
+                                 "p < 0.05" = "#F7DC6F", "p ≥ 0.05" = "#BDC3C7")) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 10),
+      legend.title = element_text(size = 10),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank()
+    ) +
+    labs(
+      title = sprintf("Top %d Most Important Features for Malaria History Classification", top_n),
+      subtitle = sprintf("%s - %s Level (%s) - Balanced Accuracy: %.1f%%", 
+                         best_model_result$Method, best_model_result$Taxonomic_Level, 
+                         best_model_result$Feature_Selection, best_model_result$Balanced_Accuracy * 100),
+      x = "Microbial Features",
+      y = "Composite Importance Score",
+      fill = "Statistical Significance",
+      caption = "Importance based on correlation, effect size, and Wilcoxon test"
+    )
+  
+  return(p1)
+}
+
+importance_plot <- create_importance_plot(combined_importance, top_n = 15)
+ggsave("SixWeekResults/feature_importance_plot.pdf", importance_plot, 
+       width = 12, height = 8, dpi = 300)
+ggsave("SixWeekResults/feature_importance_plot.png", importance_plot, 
+       width = 12, height = 8, dpi = 300)
+
+cat("[OK] Saved feature importance plot\n")
+
+# Figure 2: Box plots for top features
+create_boxplots <- function(feature_matrix, response_var, top_features_df, top_n = 6) {
+  top_feature_names <- top_features_df$Feature[1:min(top_n, nrow(top_features_df))]
+  
+  plot_list <- list()
+  
+  for(i in 1:length(top_feature_names)) {
+    feature_name <- top_feature_names[i]
+    clean_name <- gsub(".*__", "", feature_name)
+    clean_name <- gsub("_", " ", clean_name)
+    
+    plot_data <- data.frame(
+      Abundance = feature_matrix[, feature_name],
+      Group = response_var
+    )
+    
+    # Get p-value for this feature
+    p_val <- top_features_df$P_Value[top_features_df$Feature == feature_name]
+    p_text <- ifelse(p_val < 0.001, "p < 0.001", sprintf("p = %.3f", p_val))
+    
+    p <- ggplot(plot_data, aes(x = Group, y = Abundance, fill = Group)) +
+      geom_boxplot(alpha = 0.7, outlier.alpha = 0.6) +
+      geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+      scale_fill_manual(values = c("Yes" = "#E74C3C", "Never" = "#2E86C1")) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 11, face = "bold"),
+        axis.title = element_text(size = 10),
+        axis.text = element_text(size = 9),
+        legend.position = "none",
+        panel.grid.major.x = element_blank()
+      ) +
+      labs(
+        title = clean_name,
+        x = "Previous Malaria",
+        y = "Relative Abundance"
+      ) +
+      annotate("text", x = 1.5, y = max(plot_data$Abundance) * 0.9, 
+               label = p_text, size = 3, fontface = "italic")
+    
+    plot_list[[i]] <- p
+  }
+  
+  # Combine plots
+  combined_plot <- do.call(grid.arrange, c(plot_list, ncol = 3))
+  
+  return(combined_plot)
+}
+
+boxplot_figure <- create_boxplots(feature_matrix, response_var, combined_importance, top_n = 6)
+ggsave("SixWeekResults/top_features_boxplots.pdf", boxplot_figure, 
+       width = 15, height = 10, dpi = 300)
+ggsave("SixWeekResults/top_features_boxplots.png", boxplot_figure, 
+       width = 15, height = 10, dpi = 300)
+
+cat("[OK] Saved boxplot figure\n")
+
+# Figure 3: Heatmap (if pheatmap is available)
+tryCatch({
+  if(requireNamespace("pheatmap", quietly = TRUE)) {
+    top_feature_names <- combined_importance$Feature[1:min(15, nrow(combined_importance))]
+    heatmap_data <- feature_matrix[, top_feature_names, drop = FALSE]
+    
+    # Clean feature names
+    colnames(heatmap_data) <- gsub(".*__", "", colnames(heatmap_data))
+    colnames(heatmap_data) <- gsub("_", " ", colnames(heatmap_data))
+    
+    # Create annotation
+    sample_annotation <- data.frame(
+      Malaria_History = response_var,
+      row.names = rownames(heatmap_data)
+    )
+    
+    annotation_colors <- list(
+      Malaria_History = c("Yes" = "#E74C3C", "Never" = "#2E86C1")
+    )
+    
+    pheatmap::pheatmap(
+      t(heatmap_data),
+      annotation_col = sample_annotation,
+      annotation_colors = annotation_colors,
+      scale = "row",
+      clustering_distance_rows = "correlation",
+      clustering_distance_cols = "euclidean",
+      color = colorRampPalette(c("#2E86C1", "white", "#E74C3C"))(100),
+      main = sprintf("Top 15 Features - Abundance Heatmap\n%s Level (%s)", 
+                     best_model_result$Taxonomic_Level, best_model_result$Method),
+      fontsize = 10,
+      fontsize_row = 9,
+      fontsize_col = 8,
+      angle_col = 90,
+      filename = "SixWeekResults/abundance_heatmap.pdf",
+      width = 14,
+      height = 8
+    )
+    # --- SAVE AS PNG  ---
+    pheatmap::pheatmap(
+      t(heatmap_data),
+      annotation_col = sample_annotation,
+      annotation_colors = annotation_colors,
+      scale = "row",
+      clustering_distance_rows = "correlation",
+      clustering_distance_cols = "euclidean",
+      color = colorRampPalette(c("#2E86C1", "white", "#E74C3C"))(100),
+      main = sprintf("Top 15 Features - Abundance Heatmap\n%s Level (%s)", 
+                     best_model_result$Taxonomic_Level, best_model_result$Method),
+      fontsize = 10,
+      fontsize_row = 9,
+      fontsize_col = 8,
+      angle_col = 90,
+      filename = "SixWeekResults/abundance_heatmap.png", # Changed extension to png
+      width = 14,
+      height = 8
+    )
+    cat("[OK] Saved heatmap\n")
+  }
+}, error = function(e) {
+  cat("[WARNING] Could not create heatmap (pheatmap not available)\n")
+})
+
+## --------------------------------------------------------------------
+## 6. Save Results
+## --------------------------------------------------------------------
+cat("\n=== SAVING RESULTS ===\n")
+
+# Save feature importance results
+write.csv(combined_importance, "SixWeekResults/feature_importance_results.csv", row.names = FALSE)
+
+# Save top features data
+top_features_data <- feature_matrix[, combined_importance$Feature[1:min(20, nrow(combined_importance))]]
+top_features_with_response <- cbind(response_var, top_features_data)
+write.csv(top_features_with_response, "SixWeekResults/top_features_data.csv", row.names = TRUE)
+
+# Save model information
+model_info <- data.frame(
+  Attribute = c("Taxonomic_Level", "Method", "Feature_Selection", "Balanced_Accuracy", 
+                "Accuracy", "Sensitivity", "Specificity", "Total_Features"),
+  Value = c(best_model_result$Taxonomic_Level, best_model_result$Method, 
+            best_model_result$Feature_Selection, best_model_result$Balanced_Accuracy,
+            best_model_result$Accuracy, best_model_result$Sensitivity, 
+            best_model_result$Specificity, ncol(feature_matrix)),
+  stringsAsFactors = FALSE
+)
+write.csv(model_info, "SixWeekResults/best_model_info.csv", row.names = FALSE)
+
+cat("[OK] Saved CSV files\n")
+
+## --------------------------------------------------------------------
+## 7. ROC Curve Analysis
+## --------------------------------------------------------------------
+cat("\n=== GENERATING ROC CURVE ===\n")
+
+# Extract the classifier object from the best model
+best_classifier <- NULL
+
+# Try to get the classifier object
+if(!is.null(best_model_info$model_object$model)) {
+  best_classifier <- best_model_info$model_object$model
+  cat("[OK] Found classifier in model_object$model\n")
+} else if(!is.null(best_model_info$model_object)) {
+  best_classifier <- best_model_info$model_object
+  cat("[OK] Using model_object directly as classifier\n")
+} else {
+  cat("[ERROR] Could not find classifier object\n")
+}
+
+if(!is.null(best_classifier)) {
+  tryCatch({
+    # Check if ROC has already been calculated
+    if(is.null(best_classifier$res_ROC)) {
+      cat("Calculating ROC curve...\n")
+      # Calculate ROC using training data
+      best_classifier$cal_ROC(input = "train")
+      cat("[OK] ROC calculation completed\n")
+    } else {
+      cat("[OK] ROC already calculated\n")
+    }
+    
+    # Plot ROC curve
+    cat("Creating ROC plot...\n")
+    roc_plot <- best_classifier$plot_ROC(plot_type = "ROC", size = 0.5, alpha = 0.7)
+    
+    # Enhance the ROC plot with better labels
+    roc_plot_enhanced <- roc_plot + 
+      labs(
+        title = sprintf("ROC Curve - Best Model Performance"),
+        subtitle = sprintf("%s (%s) at %s Level - Balanced Accuracy: %.1f%%", 
+                           best_model_result$Method, 
+                           best_model_result$Feature_Selection,
+                           best_model_result$Taxonomic_Level, 
+                           best_model_result$Balanced_Accuracy * 100),
+        caption = sprintf("AUC: %.3f | Sensitivity: %.3f | Specificity: %.3f", 
+                          ifelse(!is.null(best_classifier$res_ROC$auc), best_classifier$res_ROC$auc, 0),
+                          best_model_result$Sensitivity,
+                          best_model_result$Specificity)
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 11, hjust = 0.5),
+        plot.caption = element_text(size = 10, hjust = 0.5)
+      )
+    
+    # Save ROC plot
+    ggsave("SixWeekResults/roc_curve.pdf", roc_plot_enhanced, 
+           width = 8, height = 6, dpi = 300)
+    ggsave("SixWeekResults/roc_curve.png", roc_plot_enhanced, 
+           width = 8, height = 6, dpi = 300)
+    
+    cat("[OK] ROC curve saved as roc_curve.pdf and roc_curve.png\n")
+    
+    # Extract AUC value if available
+    if(!is.null(best_classifier$res_ROC)) {
+      if(!is.null(best_classifier$res_ROC$auc)) {
+        auc_value <- best_classifier$res_ROC$auc
+        cat(sprintf("[OK] AUC: %.3f\n", auc_value))
+      } else {
+        cat("[WARNING] AUC value not found in ROC results\n")
+      }
+    }
+    
+    # Display the plot
+    print(roc_plot_enhanced)
+    
+  }, error = function(e) {
+    cat(sprintf("[ERROR] Error creating ROC curve: %s\n", e$message))
+    cat("This might happen if:\n")
+    cat("- The model doesn't support ROC analysis\n")
+    cat("- Training data is not available\n")
+    cat("- The classifier object structure is different\n")
+    
+    # Alternative: Try to recalculate ROC from scratch
+    cat("\nTrying alternative ROC calculation...\n")
+    
+    tryCatch({
+      # Recreate classifier if needed
+      if(exists("meco_dataset")) {
+        temp_classifier <- trans_classifier$new(
+          dataset = meco_dataset, 
+          y.response = "BeforeMalaria", 
+          x.predictors = best_model_result$Taxonomic_Level
+        )
+        temp_classifier$cal_split(prop.train = 3/4)
+        
+        # Apply feature selection if the best model used it
+        if(best_model_result$Feature_Selection == "With FS") {
+          temp_classifier$cal_feature_sel(boruta.maxRuns = 200, boruta.pValue = 0.01)
+        }
+        
+        # Set training control
+        temp_classifier$set_trainControl(method = "cv", number = 5, 
+                                         savePredictions = TRUE, classProbs = TRUE)
+        
+        # Train the specific best model
+        method_code <- switch(best_model_result$Method,
+                              "Random Forest" = "rf",
+                              "SVM (Radial Kernel)" = "svmRadial",
+                              "SVM (Linear Kernel)" = "svmLinear",
+                              "Logistic Regression" = "glm",
+                              "k-Nearest Neighbors" = "knn",
+                              "Naive Bayes" = "nb",
+                              "rf")  # default fallback
+        
+        temp_classifier$cal_train(method = method_code)
+        temp_classifier$cal_predict()
+        temp_classifier$cal_ROC(input = "train")
+        
+        # Plot ROC
+        alt_roc_plot <- temp_classifier$plot_ROC(plot_type = "ROC", size = 0.5, alpha = 0.7)
+        alt_roc_plot_enhanced <- alt_roc_plot + 
+          labs(
+            title = "ROC Curve - Best Model (Recreated)",
+            subtitle = sprintf("%s (%s) at %s Level", 
+                               best_model_result$Method, 
+                               best_model_result$Feature_Selection,
+                               best_model_result$Taxonomic_Level)
+          )
+        
+        ggsave("SixWeekResults/roc_curve_alt.pdf", alt_roc_plot_enhanced, 
+               width = 8, height = 6, dpi = 300)
+        
+        cat("[OK] Alternative ROC curve created and saved as roc_curve_alt.pdf\n")
+        print(alt_roc_plot_enhanced)
+        
+      }
+    }, error = function(e2) {
+      cat(sprintf("[ERROR] Alternative ROC calculation also failed: %s\n", e2$message))
+    })
+  })
+} else {
+  cat("[ERROR] Cannot create ROC curve - classifier object not found\n")
+}
+
+## --------------------------------------------------------------------
+## 8. Confusion Matrix Analysis
+## --------------------------------------------------------------------
+cat("\n=== GENERATING CONFUSION MATRIX ===\n")
+
+if(!is.null(best_classifier)) {
+  tryCatch({
+    # Plot confusion matrix using simple microeco call
+    cat("Creating confusion matrix plot...\n")
+    confusion_plot <- best_classifier$plot_confusionMatrix()
+    
+    # Save confusion matrix plot
+    ggsave("SixWeekResults/confusion_matrix.pdf", confusion_plot, 
+           width = 8, height = 6, dpi = 300)
+    ggsave("SixWeekResults/confusion_matrix.png", confusion_plot, 
+           width = 8, height = 6, dpi = 300)
+    
+    cat("[OK] Confusion matrix saved as confusion_matrix.pdf and confusion_matrix.png\n")
+    
+    # Display the plot
+    print(confusion_plot)
+    
+  }, error = function(e) {
+    cat(sprintf("[ERROR] Error creating confusion matrix: %s\n", e$message))
+    cat("The plot_confusionMatrix() method may not be available for this classifier object.\n")
+  })
+} else {
+  cat("[ERROR] Cannot create confusion matrix - classifier object not found\n")
+}
+
+## --------------------------------------------------------------------
+## 9. Additional Performance Summary Table
+## --------------------------------------------------------------------
+cat("\n=== CREATING PERFORMANCE SUMMARY TABLE ===\n")
+
+# Create a comprehensive performance summary
+performance_summary <- data.frame(
+  Metric = c("Balanced Accuracy", "Accuracy", "Sensitivity", "Specificity", 
+             "Precision", "F1 Score"),
+  Value = c(
+    sprintf("%.3f (%.1f%%)", best_model_result$Balanced_Accuracy, best_model_result$Balanced_Accuracy * 100),
+    sprintf("%.3f (%.1f%%)", best_model_result$Accuracy, best_model_result$Accuracy * 100),
+    sprintf("%.3f (%.1f%%)", best_model_result$Sensitivity, best_model_result$Sensitivity * 100),
+    sprintf("%.3f (%.1f%%)", best_model_result$Specificity, best_model_result$Specificity * 100),
+    sprintf("%.3f (%.1f%%)", ifelse(is.na(best_model_result$Precision), 0, best_model_result$Precision), 
+            ifelse(is.na(best_model_result$Precision), 0, best_model_result$Precision) * 100),
+    sprintf("%.3f (%.1f%%)", ifelse(is.na(best_model_result$F1_Score), 0, best_model_result$F1_Score), 
+            ifelse(is.na(best_model_result$F1_Score), 0, best_model_result$F1_Score) * 100)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Add AUC if available
+if(!is.null(best_classifier) && !is.null(best_classifier$res_ROC) && !is.null(best_classifier$res_ROC$auc)) {
+  performance_summary <- rbind(performance_summary,
+                               data.frame(Metric = "AUC", 
+                                          Value = sprintf("%.3f", best_classifier$res_ROC$auc),
+                                          stringsAsFactors = FALSE))
+}
+
+# Save performance summary
+write.csv(performance_summary, "SixWeekResults/performance_summary.csv", row.names = FALSE)
+
+cat("[OK] Performance summary saved as performance_summary.csv\n")
+cat("\nPerformance Summary:\n")
+print(performance_summary)
+
+## --------------------------------------------------------------------
+## 10. Updated Final Summary Report
+## --------------------------------------------------------------------
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("BEST MODEL FEATURE EXTRACTION AND ANALYSIS - SUMMARY REPORT\n")
+cat(paste(rep("=", 80), collapse = ""), "\n")
+
+cat(sprintf("Best Model Details:\n"))
+cat(sprintf("- Taxonomic Level: %s\n", best_model_result$Taxonomic_Level))
+cat(sprintf("- Method: %s\n", best_model_result$Method))
+cat(sprintf("- Feature Selection: %s\n", best_model_result$Feature_Selection))
+cat(sprintf("- Balanced Accuracy: %.1f%%\n", best_model_result$Balanced_Accuracy * 100))
+cat(sprintf("- Accuracy: %.1f%%\n", best_model_result$Accuracy * 100))
+cat(sprintf("- Sensitivity: %.1f%%\n", best_model_result$Sensitivity * 100))
+cat(sprintf("- Specificity: %.1f%%\n", best_model_result$Specificity * 100))
+if(!is.na(best_model_result$Precision)) {
+  cat(sprintf("- Precision: %.1f%%\n", best_model_result$Precision * 100))
+}
+if(!is.na(best_model_result$F1_Score)) {
+  cat(sprintf("- F1 Score: %.1f%%\n", best_model_result$F1_Score * 100))
+}
+cat(sprintf("- Total Features Used: %d\n", ncol(feature_matrix)))
+
+# Add AUC if available
+if(!is.null(best_classifier) && !is.null(best_classifier$res_ROC) && !is.null(best_classifier$res_ROC$auc)) {
+  cat(sprintf("- AUC: %.3f\n", best_classifier$res_ROC$auc))
+}
+
+cat(sprintf("\nTop 5 Most Important Features:\n"))
+for(i in 1:min(5, nrow(combined_importance))) {
+  feature_clean <- gsub(".*__", "", combined_importance$Feature[i])
+  cat(sprintf("%d. %s (Score: %.3f, p-value: %.3f)\n", 
+              i, feature_clean, combined_importance$Composite_Score[i], 
+              combined_importance$P_Value[i]))
+}
+
+cat(sprintf("\nGenerated Files in SixWeekResults folder:\n"))
+cat("=== Visualizations ===\n")
+cat("- feature_importance_plot.pdf/png: Main feature importance visualization\n")
+cat("- top_features_boxplots.pdf/png: Distribution of top features by group\n")
+cat("- abundance_heatmap.pdf: Heatmap of top features across samples\n")
+cat("- roc_curve.pdf/png: ROC curve for best model performance\n")
+cat("- confusion_matrix.pdf/png: Confusion matrix visualization\n")
+
+cat("\n=== Data Files ===\n")
+cat("- feature_importance_results.csv: Complete feature importance data\n")
+cat("- top_features_data.csv: Abundance data for top features\n")
+cat("- best_model_info.csv: Best model summary information\n")
+cat("- performance_summary.csv: Comprehensive performance metrics\n")
+
+cat("\n=== Model Performance Interpretation ===\n")
+bal_acc_pct <- best_model_result$Balanced_Accuracy * 100
+if(bal_acc_pct >= 85) {
+  interpretation <- "Excellent predictive performance - very strong microbiome signal"
+} else if(bal_acc_pct >= 75) {
+  interpretation <- "Good predictive performance - strong microbiome signal detected"
+} else if(bal_acc_pct >= 65) {
+  interpretation <- "Moderate predictive performance - detectable microbiome signal"
+} else if(bal_acc_pct >= 55) {
+  interpretation <- "Fair predictive performance - weak but present microbiome signal"
+} else {
+  interpretation <- "Limited predictive performance - minimal microbiome signal"
+}
+
+cat(sprintf("Performance Level: %s\n", interpretation))
+
+# Add clinical/biological interpretation
+cat(sprintf("\nBiological Interpretation:\n"))
+cat(sprintf("The %s level taxonomy provides the best discrimination between\n", best_model_result$Taxonomic_Level))
+cat(sprintf("individuals with and without previous malaria history (Balanced Accuracy: %.1f%%).\n", bal_acc_pct))
+cat(sprintf("This suggests that previous malaria infection leaves detectable signatures\n"))
+cat(sprintf("in the gut microbiome at the %s taxonomic resolution.\n", tolower(best_model_result$Taxonomic_Level)))
+
+if(best_model_result$Feature_Selection == "With FS") {
+  cat(sprintf("\nFeature selection improved model performance, indicating that\n"))
+  cat(sprintf("a subset of specific microbial taxa are most informative for\n"))
+  cat(sprintf("distinguishing malaria history rather than the entire microbial community.\n"))
+} else {
+  cat(sprintf("\nThe model performed best without feature selection, suggesting that\n"))
+  cat(sprintf("the entire microbial community profile contributes to the discrimination\n"))
+  cat(sprintf("rather than just a few specific taxa.\n"))
+}
+
+cat("\n=== COMPREHENSIVE ANALYSIS COMPLETE ===\n")
+
+# Show the final importance plot
+```
+
+
+## First-Year Classifier (for completeness)
+
+Verbatim from `FirstYearModelDetermination.R`. As reported in the
+Supplemental Methods, this model failed at the test set step.
+
+```{r classifier-1y, cache=TRUE}
+set.seed(123)
+dir.create("FirstYear", showWarnings = FALSE)
+
+# Data Preparation for First Year (verbatim, readRDS replaced)
+meco_dataset_1y <- phyloseq2meco(combinedcongo)
+meco_dataset_1y$tidy_dataset()
+meco_dataset_1y$tax_table <- base::subset(meco_dataset_1y$tax_table, Kingdom %in% c("k__Archaea", "k__Bacteria"))
+meco_dataset_1y$filter_pollution(taxa = c("mitochondria", "chloroplast"))
+st_1y <- subset(meco_dataset_1y$sample_table, Type == "sample")
+st_1y$BeforeMalaria <- as.character(st_1y$BeforeMalaria)
+st_1y$BeforeMalaria[is.na(st_1y$BeforeMalaria)] <- "Never"
+st_1y <- subset(st_1y, BeforeMalaria %in% c("Yes", "Never"))
+st_1y$BeforeMalaria <- factor(st_1y$BeforeMalaria, levels = c("Yes", "Never"))
+meco_dataset_1y$sample_table <- st_1y
+meco_dataset_1y$tidy_dataset()
+
+cat(sprintf("First-year dataset: %d samples\n", nrow(meco_dataset_1y$sample_table)))
+print(table(meco_dataset_1y$sample_table$BeforeMalaria))
+## --------------------------------------------------------------------
+## 2. Determine Available Taxonomic Levels
+## --------------------------------------------------------------------
+get_available_taxonomic_levels <- function(meco_obj) {
+  # Get all taxonomic columns from tax_table
+  tax_cols <- colnames(meco_obj$tax_table)
+  
+  # Remove 'Taxa' column if it exists (this is typically the row identifier)
+  tax_cols <- tax_cols[tax_cols != "Taxa"]
+  
+  # Common taxonomic level mappings
+  level_mappings <- c(
+    "Kingdom" = "Kingdom",
+    "Phylum" = "Phylum", 
+    "Class" = "Class",
+    "Order" = "Order",
+    "Family" = "Family",
+    "Genus" = "Genus",
+    "Species" = "Species"
+  )
+  
+  # Find which levels are available
+  available_levels <- c()
+  for(level in names(level_mappings)) {
+    if(level %in% tax_cols) {
+      available_levels <- c(available_levels, level)
+    }
+  }
+  
+  # If no standard names found, use all columns except Taxa
+  if(length(available_levels) == 0) {
+    available_levels <- tax_cols
+    cat("Warning: Using all tax_table columns as taxonomic levels\n")
+  }
+  
+  return(available_levels)
+}
+
+# Get available taxonomic levels
+taxonomic_levels <- get_available_taxonomic_levels(meco_dataset)
+cat("Available taxonomic levels:\n")
+cat(paste(taxonomic_levels, collapse = ", "), "\n\n")
+
+## --------------------------------------------------------------------
+## 3. Robust Performance Extraction Function
+## --------------------------------------------------------------------
+extract_microeco_performance <- function(classifier_obj) {
+  results <- list(
+    accuracy = NA,
+    sensitivity = NA,
+    specificity = NA,
+    precision = NA,
+    f1_score = NA,
+    balanced_accuracy = NA,
+    confusion_matrix = NULL,
+    success = FALSE
+  )
+  
+  tryCatch({
+    # Check multiple possible locations for confusion matrix
+    cm <- NULL
+    
+    # Method 1: res_predict$confusionMatrix
+    if(!is.null(classifier_obj$res_predict) && is.list(classifier_obj$res_predict)) {
+      if("confusionMatrix" %in% names(classifier_obj$res_predict)) {
+        cm <- classifier_obj$res_predict$confusionMatrix
+      }
+    }
+    
+    # Method 2: Direct access to confusionMatrix
+    if(is.null(cm) && !is.null(classifier_obj$res_confusion_fit)) {
+      cm <- classifier_obj$res_confusion_fit
+    }
+    
+    # Method 3: Check res_confusion_stats
+    if(is.null(cm) && !is.null(classifier_obj$res_confusion_stats)) {
+      cm <- classifier_obj$res_confusion_stats
+    }
+    
+    if(!is.null(cm)) {
+      # Extract overall metrics
+      if(!is.null(cm$overall) && is.vector(cm$overall)) {
+        if("Accuracy" %in% names(cm$overall)) {
+          results$accuracy <- as.numeric(cm$overall["Accuracy"])
+        }
+      }
+      
+      # Extract by-class metrics
+      if(!is.null(cm$byClass) && is.vector(cm$byClass)) {
+        metric_names <- names(cm$byClass)
+        
+        if("Sensitivity" %in% metric_names) {
+          results$sensitivity <- as.numeric(cm$byClass["Sensitivity"])
+        }
+        if("Specificity" %in% metric_names) {
+          results$specificity <- as.numeric(cm$byClass["Specificity"])
+        }
+        if("Pos Pred Value" %in% metric_names) {
+          results$precision <- as.numeric(cm$byClass["Pos Pred Value"])
+        }
+        if("F1" %in% metric_names) {
+          results$f1_score <- as.numeric(cm$byClass["F1"])
+        }
+        if("Balanced Accuracy" %in% metric_names) {
+          results$balanced_accuracy <- as.numeric(cm$byClass["Balanced Accuracy"])
+        }
+        
+        # Calculate balanced accuracy if not available
+        if(is.na(results$balanced_accuracy) && !is.na(results$sensitivity) && !is.na(results$specificity)) {
+          results$balanced_accuracy <- (results$sensitivity + results$specificity) / 2
+        }
+      }
+      
+      results$confusion_matrix <- cm
+      results$success <- TRUE
+      
+      cat(sprintf("  Performance extracted: Accuracy=%.3f, Sensitivity=%.3f, Specificity=%.3f\n",
+                  ifelse(is.na(results$accuracy), 0, results$accuracy),
+                  ifelse(is.na(results$sensitivity), 0, results$sensitivity),
+                  ifelse(is.na(results$specificity), 0, results$specificity)))
+    } else {
+      cat("  Warning: No confusion matrix found in classifier object\n")
+    }
+    
+  }, error = function(e) {
+    cat(sprintf("  Error extracting performance: %s\n", e$message))
+  })
+  
+  return(results)
+}
+
+## --------------------------------------------------------------------
+## 4. Enhanced Single Classifier Training Function
+## --------------------------------------------------------------------
+train_microeco_classifier <- function(dataset, method_name, method_display_name, 
+                                      taxonomic_level, with_feature_selection = TRUE, verbose = TRUE) {
+  
+  if(verbose) cat(sprintf("\nTraining %s (%s) at %s level%s...\n", 
+                          method_display_name, method_name, taxonomic_level,
+                          ifelse(with_feature_selection, " with Feature Selection", "")))
+  
+  result <- list(
+    method_code = method_name,
+    method_name = method_display_name,
+    taxonomic_level = taxonomic_level,
+    with_fs = with_feature_selection,
+    model = NULL,
+    performance = NULL,
+    success = FALSE,
+    error_message = NULL
+  )
+  
+  tryCatch({
+    # Create classifier
+    classifier <- trans_classifier$new(
+      dataset = dataset, 
+      y.response = "BeforeMalaria", 
+      x.predictors = taxonomic_level  # Now using the specified taxonomic level
+    )
+    
+    # Check if we have enough features to proceed
+    if(!is.null(classifier$data_feature)) {
+      initial_feature_count <- ncol(classifier$data_feature)
+      if(verbose) cat(sprintf("  Available features at %s level: %d\n", taxonomic_level, initial_feature_count))
+      
+      # Skip if too few features for meaningful analysis
+      if(initial_feature_count < 2) {
+        stop(sprintf("Insufficient features (%d) at %s level for classification", initial_feature_count, taxonomic_level))
+      }
+    }
+    
+    # Split data
+    classifier$cal_split(prop.train = 3/4)
+    
+    # Feature selection if requested
+    if(with_feature_selection) {
+      # Check number of features available
+      initial_features <- ncol(classifier$data_feature)
+      if(verbose) cat(sprintf("  Initial features available: %d\n", initial_features))
+      
+      # Skip feature selection if too few features
+      if(initial_features <= 3) {
+        if(verbose) cat(sprintf("  Skipping feature selection (only %d features available)\n", initial_features))
+      } else {
+        classifier$cal_feature_sel(boruta.maxRuns = 200, boruta.pValue = 0.01)
+        
+        # Check if any features were selected
+        remaining_features <- ncol(classifier$data_train)
+        if(verbose) cat(sprintf("  Features after selection: %d\n", remaining_features))
+        
+        # If no features selected, skip this model
+        if(remaining_features == 0) {
+          stop("No features selected by Boruta - model cannot be trained")
+        }
+      }
+    }
+    
+    # Set training control
+    classifier$set_trainControl(method = "cv", number = 5, savePredictions = TRUE, classProbs = TRUE)
+    
+    # Train model with method-specific parameters
+    if(method_name == "rf") {
+      classifier$cal_train(method = "rf")
+    } else if(method_name == "svmRadial") {
+      classifier$cal_train(method = "svmRadial", tuneLength = 5)
+    } else if(method_name == "svmLinear") {
+      classifier$cal_train(method = "svmLinear", tuneLength = 3)
+    } else if(method_name == "glm") {
+      classifier$cal_train(method = "glm")
+    } else if(method_name == "knn") {
+      classifier$cal_train(method = "knn", tuneGrid = expand.grid(k = c(3, 5, 7)))
+    } else if(method_name == "nb") {
+      classifier$cal_train(method = "nb")
+    } else {
+      classifier$cal_train(method = method_name)
+    }
+    
+    # Make predictions
+    classifier$cal_predict()
+    
+    # Calculate ROC (optional, with error handling)
+    tryCatch({
+      classifier$cal_ROC()
+    }, error = function(e) {
+      if(verbose) cat(sprintf("  Note: ROC calculation failed: %s\n", e$message))
+    })
+    
+    # Store model
+    result$model <- classifier
+    
+    # Extract performance
+    performance <- extract_microeco_performance(classifier)
+    result$performance <- performance
+    result$success <- performance$success
+    
+    if(result$success) {
+      if(verbose) cat(sprintf("[OK] %s (%s) training completed successfully\n", method_display_name, taxonomic_level))
+    } else {
+      if(verbose) cat(sprintf("[WARNING] %s (%s) training completed but performance extraction failed\n", method_display_name, taxonomic_level))
+    }
+    
+  }, error = function(e) {
+    result$error_message <- e$message
+    if(verbose) cat(sprintf("[FAIL] Error training %s (%s): %s\n", method_display_name, taxonomic_level, e$message))
+  })
+  
+  return(result)
+}
+
+## --------------------------------------------------------------------
+## 5. Main Analysis Pipeline
+## --------------------------------------------------------------------
+cat("\n=== COMPREHENSIVE MULTI-TAXONOMIC MICROECO CLASSIFIER ANALYSIS ===\n")
+cat("Dataset info:\n")
+cat(sprintf("- Total samples: %d\n", nrow(meco_dataset$sample_table)))
+cat(sprintf("- Response variable levels: %s\n", paste(levels(meco_dataset$sample_table$BeforeMalaria), collapse = ", ")))
+cat(sprintf("- Total features available: %d\n", nrow(meco_dataset$otu_table)))
+cat(sprintf("- Taxonomic levels to analyze: %s\n", paste(taxonomic_levels, collapse = ", ")))
+
+# Define methods to test
+methods_to_test <- list(
+  "rf" = "Random Forest",
+  "svmRadial" = "SVM (Radial Kernel)",
+  "svmLinear" = "SVM (Linear Kernel)", 
+  "glm" = "Logistic Regression",
+  "knn" = "k-Nearest Neighbors",
+  "nb" = "Naive Bayes"
+)
+
+# Storage for all results
+all_results <- list()
+
+## --------------------------------------------------------------------
+## 6. Run All Classifiers for All Taxonomic Levels
+## --------------------------------------------------------------------
+cat("\n=== TRAINING ALL CLASSIFIERS ACROSS ALL TAXONOMIC LEVELS ===\n")
+
+total_combinations <- length(taxonomic_levels) * length(methods_to_test) * 2  # *2 for with/without FS
+current_combination <- 0
+
+for(tax_level in taxonomic_levels) {
+  cat(sprintf("\n--- ANALYZING TAXONOMIC LEVEL: %s ---\n", tax_level))
+  
+  # Quick check of feature availability at this level
+  tryCatch({
+    temp_classifier <- trans_classifier$new(
+      dataset = meco_dataset, 
+      y.response = "BeforeMalaria", 
+      x.predictors = tax_level
+    )
+    feature_count <- ncol(temp_classifier$data_feature)
+    cat(sprintf("Features available at %s level: %d\n", tax_level, feature_count))
+    
+    if(feature_count < 2) {
+      cat(sprintf("[WARNING] Skipping %s level - insufficient features for classification\n", tax_level))
+      # Still increment counters to maintain progress tracking
+      current_combination <- current_combination + (length(methods_to_test) * 2)
+      next
+    }
+    
+  }, error = function(e) {
+    cat(sprintf("[WARNING] Error checking %s level: %s\n", tax_level, e$message))
+    current_combination <- current_combination + (length(methods_to_test) * 2)
+    next
+  })
+  
+  for(method_code in names(methods_to_test)) {
+    method_name <- methods_to_test[[method_code]]
+    
+    # With feature selection
+    current_combination <- current_combination + 1
+    cat(sprintf("\n[%d/%d] ", current_combination, total_combinations))
+    
+    result_with_fs <- train_microeco_classifier(
+      dataset = meco_dataset,
+      method_name = method_code,
+      method_display_name = method_name,
+      taxonomic_level = tax_level,
+      with_feature_selection = TRUE
+    )
+    all_results[[paste0(tax_level, "_", method_code, "_with_fs")]] <- result_with_fs
+    
+    # Without feature selection
+    current_combination <- current_combination + 1
+    cat(sprintf("\n[%d/%d] ", current_combination, total_combinations))
+    
+    result_without_fs <- train_microeco_classifier(
+      dataset = meco_dataset,
+      method_name = method_code,
+      method_display_name = method_name,
+      taxonomic_level = tax_level,
+      with_feature_selection = FALSE
+    )
+    all_results[[paste0(tax_level, "_", method_code, "_without_fs")]] <- result_without_fs
+    
+    # Brief pause
+    Sys.sleep(1)
+  }
+}
+
+## --------------------------------------------------------------------
+## 7. Create Comprehensive Results Summary
+## --------------------------------------------------------------------
+cat("\n=== CREATING RESULTS SUMMARY ===\n")
+
+create_results_dataframe <- function(results_list) {
+  df <- data.frame(
+    Taxonomic_Level = character(),
+    Method = character(),
+    Feature_Selection = character(),
+    Success = logical(),
+    Accuracy = numeric(),
+    Sensitivity = numeric(),
+    Specificity = numeric(),
+    Precision = numeric(),
+    F1_Score = numeric(),
+    Balanced_Accuracy = numeric(),
+    Error_Message = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for(result_name in names(results_list)) {
+    result <- results_list[[result_name]]
+    
+    # Extract performance metrics
+    acc <- ifelse(!is.null(result$performance) && !is.na(result$performance$accuracy), 
+                  result$performance$accuracy, 0)
+    sens <- ifelse(!is.null(result$performance) && !is.na(result$performance$sensitivity), 
+                   result$performance$sensitivity, 0)
+    spec <- ifelse(!is.null(result$performance) && !is.na(result$performance$specificity), 
+                   result$performance$specificity, 0)
+    prec <- ifelse(!is.null(result$performance) && !is.na(result$performance$precision), 
+                   result$performance$precision, 0)
+    f1 <- ifelse(!is.null(result$performance) && !is.na(result$performance$f1_score), 
+                 result$performance$f1_score, 0)
+    bal_acc <- ifelse(!is.null(result$performance) && !is.na(result$performance$balanced_accuracy), 
+                      result$performance$balanced_accuracy, 0)
+    
+    df <- rbind(df, data.frame(
+      Taxonomic_Level = result$taxonomic_level,
+      Method = result$method_name,
+      Feature_Selection = ifelse(result$with_fs, "With FS", "Without FS"),
+      Success = result$success,
+      Accuracy = acc,
+      Sensitivity = sens,
+      Specificity = spec,
+      Precision = prec,
+      F1_Score = f1,
+      Balanced_Accuracy = bal_acc,
+      Error_Message = ifelse(is.null(result$error_message), "", result$error_message),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  return(df)
+}
+
+# Create summary dataframe
+results_summary <- create_results_dataframe(all_results)
+
+# Print summary by taxonomic level
+cat("\n=== PERFORMANCE SUMMARY BY TAXONOMIC LEVEL ===\n")
+for(tax_level in taxonomic_levels) {
+  cat(sprintf("\n--- %s Level ---\n", tax_level))
+  level_results <- results_summary[results_summary$Taxonomic_Level == tax_level, ]
+  print(level_results[, c("Method", "Feature_Selection", "Success", "Accuracy", "Sensitivity", "Specificity", "Balanced_Accuracy")])
+}
+
+## --------------------------------------------------------------------
+## 8. Identify Best Models
+## --------------------------------------------------------------------
+cat("\n=== BEST MODEL IDENTIFICATION ===\n")
+
+successful_results <- results_summary[results_summary$Success == TRUE, ]
+
+if(nrow(successful_results) > 0) {
+  # Sort by balanced accuracy
+  successful_results <- successful_results[order(successful_results$Balanced_Accuracy, decreasing = TRUE), ]
+  
+  cat("Top 10 performing models across all taxonomic levels:\n")
+  top_n <- min(10, nrow(successful_results))
+  for(i in 1:top_n) {
+    cat(sprintf("%d. %s - %s (%s): Balanced Accuracy = %.3f, Accuracy = %.3f\n", 
+                i, 
+                successful_results$Taxonomic_Level[i],
+                successful_results$Method[i],
+                successful_results$Feature_Selection[i],
+                successful_results$Balanced_Accuracy[i],
+                successful_results$Accuracy[i]))
+  }
+  
+  # Best overall model
+  best_model <- successful_results[1, ]
+  cat(sprintf("\n>>> BEST OVERALL MODEL: %s - %s (%s)\n", 
+              best_model$Taxonomic_Level, best_model$Method, best_model$Feature_Selection))
+  cat(sprintf("   Performance: Accuracy=%.3f, Sensitivity=%.3f, Specificity=%.3f, Balanced Accuracy=%.3f\n",
+              best_model$Accuracy, best_model$Sensitivity, best_model$Specificity, best_model$Balanced_Accuracy))
+  
+  # Best model for each taxonomic level
+  cat("\n=== BEST MODEL PER TAXONOMIC LEVEL ===\n")
+  for(tax_level in taxonomic_levels) {
+    level_results <- successful_results[successful_results$Taxonomic_Level == tax_level, ]
+    if(nrow(level_results) > 0) {
+      best_for_level <- level_results[1, ]
+      cat(sprintf("%s: %s (%s) - Balanced Accuracy = %.3f\n",
+                  tax_level, best_for_level$Method, best_for_level$Feature_Selection, 
+                  best_for_level$Balanced_Accuracy))
+    } else {
+      cat(sprintf("%s: No successful models\n", tax_level))
+    }
+  }
+  
+} else {
+  cat("[WARNING] No successful models found. Check for errors in the analysis.\n")
+}
+
+## --------------------------------------------------------------------
+## 9. Generate Enhanced Visualizations
+## --------------------------------------------------------------------
+cat("\n=== GENERATING VISUALIZATIONS ===\n")
+
+if(nrow(successful_results) > 0) {
+  
+  # Performance comparison plot by taxonomic level
+  library(reshape2)
+  plot_data <- successful_results[, c("Taxonomic_Level", "Method", "Feature_Selection", "Accuracy", "Sensitivity", "Specificity", "Balanced_Accuracy")]
+  melted_data <- melt(plot_data, id.vars = c("Taxonomic_Level", "Method", "Feature_Selection"))
+  
+  performance_plot <- ggplot(melted_data, aes(x = Method, y = value, fill = Feature_Selection)) +
+    geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+    facet_grid(variable ~ Taxonomic_Level, scales = "free_y") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          strip.text = element_text(size = 9)) +
+    labs(title = "Classifier Performance Across All Taxonomic Levels",
+         subtitle = sprintf("Analysis of %d samples with %s outcome classification", 
+                            nrow(meco_dataset$sample_table),
+                            paste(levels(meco_dataset$sample_table$BeforeMalaria), collapse = " vs ")),
+         x = "Classification Method",
+         y = "Performance Metric",
+         fill = "Feature Selection") +
+    scale_fill_manual(values = c("With FS" = "#2E86C1", "Without FS" = "#E74C3C")) +
+    ylim(0, 1)
+  
+  ggsave("FirstYear/FirstYearmicrobiome_multi_taxonomic_performance.pdf", performance_plot, width = 20, height = 12, dpi = 300)
+  cat("[OK] Multi-taxonomic performance comparison plot saved to FirstYear folder\n")
+  
+  # Summary heatmap showing best performance per taxonomic level
+  summary_for_heatmap <- successful_results %>%
+    group_by(Taxonomic_Level, Method) %>%
+    summarise(Best_Balanced_Accuracy = max(Balanced_Accuracy), .groups = 'drop')
+  
+  heatmap_plot <- ggplot(summary_for_heatmap, aes(x = Method, y = Taxonomic_Level, fill = Best_Balanced_Accuracy)) +
+    geom_tile(color = "white", size = 0.5) +
+    geom_text(aes(label = sprintf("%.3f", Best_Balanced_Accuracy)), color = "white", fontface = "bold") +
+    scale_fill_gradient2(low = "#E74C3C", mid = "#F39C12", high = "#27AE60", 
+                         midpoint = 0.6, name = "Balanced\nAccuracy") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Best Performance Heatmap by Taxonomic Level and Method",
+         subtitle = "Values shown are best balanced accuracy (with or without feature selection)",
+         x = "Classification Method",
+         y = "Taxonomic Level")
+  
+  ggsave("FirstYear/FirstYearmicrobiome_performance_heatmap.pdf", heatmap_plot, width = 12, height = 8, dpi = 300)
+  cat("[OK] Performance heatmap saved to FirstYear folder\n")
+  
+}
+
+## --------------------------------------------------------------------
+## 10. Save All Results
+## --------------------------------------------------------------------
+cat("\n=== SAVING RESULTS ===\n")
+
+# Save summary table to FirstYear folder
+write.csv(results_summary, "FirstYear/FirstYearmicrobiome_multi_taxonomic_results.csv", row.names = FALSE)
+cat("[OK] Results summary saved to FirstYear folder\n")
+
+# Save R workspace to root folder
+save(all_results, results_summary, meco_dataset, successful_results, taxonomic_levels,
+     file = "FirstYearmicrobiome_multi_taxonomic_analysis.RData")
+cat("[OK] Complete analysis saved as RData file in root folder\n")
+
+## --------------------------------------------------------------------
+## 11. Final Summary Report
+## --------------------------------------------------------------------
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("MULTI-TAXONOMIC MICROBIOME CLASSIFICATION ANALYSIS - FINAL REPORT\n")
+cat(paste(rep("=", 80), collapse = ""), "\n")
+
+cat(sprintf("Dataset: Congo Malaria Microbiome Study\n"))
+cat(sprintf("Target Variable: Before Malaria (Yes/Never)\n"))
+cat(sprintf("Total Samples: %d\n", nrow(meco_dataset$sample_table)))
+cat(sprintf("Taxonomic Levels Analyzed: %s\n", paste(taxonomic_levels, collapse = ", ")))
+cat(sprintf("Feature Selection: Boruta Algorithm\n"))
+cat(sprintf("Cross-Validation: 5-fold CV\n\n"))
+
+cat(sprintf("Total Models Trained: %d\n", length(all_results)))
+cat(sprintf("Models per Taxonomic Level: %d (%d with FS, %d without FS)\n", 
+            length(methods_to_test) * 2,
+            length(methods_to_test), 
+            length(methods_to_test)))
+
+cat(sprintf("Successful Models: %d\n", nrow(successful_results)))
+cat(sprintf("Failed Models: %d\n", length(all_results) - nrow(successful_results)))
+
+if(nrow(successful_results) > 0) {
+  cat(sprintf("\nBest Overall Model: %s - %s (%s)\n", 
+              best_model$Taxonomic_Level, best_model$Method, best_model$Feature_Selection))
+  cat(sprintf("Best Model Accuracy: %.1f%%\n", best_model$Accuracy * 100))
+  cat(sprintf("Best Model Balanced Accuracy: %.1f%%\n", best_model$Balanced_Accuracy * 100))
+  
+  # Performance interpretation
+  if(best_model$Balanced_Accuracy > 0.75) {
+    interpretation <- "Excellent predictive performance - strong microbiome signal for malaria history"
+  } else if(best_model$Balanced_Accuracy > 0.65) {
+    interpretation <- "Good predictive performance - moderate microbiome signal detected"
+  } else if(best_model$Balanced_Accuracy > 0.55) {
+    interpretation <- "Moderate predictive performance - weak but detectable microbiome signal"
+  } else {
+    interpretation <- "Limited predictive performance - microbiome signal for malaria history is weak"
+  }
+  
+  cat(sprintf("\nInterpretation: %s\n", interpretation))
+  
+  # Taxonomic level analysis
+  cat(sprintf("\nTaxonomic Level Performance Summary:\n"))
+  for(tax_level in taxonomic_levels) {
+    level_results <- successful_results[successful_results$Taxonomic_Level == tax_level, ]
+    if(nrow(level_results) > 0) {
+      avg_performance <- mean(level_results$Balanced_Accuracy)
+      best_performance <- max(level_results$Balanced_Accuracy)
+      cat(sprintf("- %s: Avg=%.3f, Best=%.3f (%d successful models)\n", 
+                  tax_level, avg_performance, best_performance, nrow(level_results)))
+    } else {
+      cat(sprintf("- %s: No successful models\n", tax_level))
+    }
+  }
+}
+
+cat("\nGenerated Files:\n")
+cat("=== FirstYear Folder ===\n")
+cat("- FirstYearmicrobiome_multi_taxonomic_results.csv: Detailed performance metrics\n")
+cat("- FirstYearmicrobiome_multi_taxonomic_performance.pdf: Performance comparison plot\n")
+cat("- FirstYearmicrobiome_performance_heatmap.pdf: Summary heatmap\n")
+cat("\n=== Root Folder ===\n")
+cat("- FirstYearmicrobiome_multi_taxonomic_analysis.RData: Complete R workspace\n")
+
+```
+
+
+# DAR Consensus Analysis
+
+Verbatim from `DAR_Analysis.R`. Loads from the RData file saved by the
+6W classifier chunk above.
+
+```{r dar-analysis, cache=TRUE}
+set.seed(123)
+library(dar)
+library(ALDEx2)
+library(DESeq2)
+library(metagenomeSeq)
+library(Maaslin2)
+library(future)
+has_lefser <- requireNamespace("lefser", quietly = TRUE)
+dir.create("DAR_Genus", showWarnings = FALSE)
+dir.create("DAR_Species", showWarnings = FALSE)
+if (has_lefser) library(lefser) else cat("Note: lefser not available, step_lefse skipped.\n")
+# 1. Load data and prepare
+load("SixWeekmicrobiome_multi_taxonomic_analysis.RData")
+meco_da <- meco_dataset$clone(deep = TRUE)
+
+## 2A. Recreate Predicted_Group
+best_info  <- successful_results[1, ]
+method_map <- list("Random Forest" = "rf", "SVM (Radial Kernel)" = "svmRadial",
+                   "SVM (Linear Kernel)" = "svmLinear", "Logistic Regression" = "glm",
+                   "k-Nearest Neighbors" = "knn", "Naive Bayes" = "nb")
+m_code     <- method_map[[as.character(best_info$Method)]]
+fs_code    <- ifelse(best_info$Feature_Selection == "With FS","with_fs","without_fs")
+best_name  <- paste0(best_info$Taxonomic_Level,"_",m_code,"_",fs_code)
+pred       <- predict(all_results[[best_name]]$model$res_train,
+                      newdata = all_results[[best_name]]$model$data_feature)
+meco_da$sample_table$Predicted_Group <- factor(pred,
+                                               levels = c("Never","Yes"),
+                                               labels = c("Resistant","Susceptible"))
+
+# 2. Convert to phyloseq
+ps <- meco2phyloseq(meco_da)
+
+# 3. Genus-level analysis
+rec_genus <- recipe(ps, "Predicted_Group", "Genus") %>%
+  step_wilcox(rarefy = FALSE) %>%
+  step_aldex(rarefy = FALSE, mc.samples = 128) %>%
+  step_deseq(rarefy = FALSE) %>%
+  step_corncob(rarefy = FALSE, filter_discriminant = FALSE) %>%
+  step_metagenomeseq(rarefy = FALSE, rm_zeros = 0.01) %>%
+  step_maaslin(rarefy = FALSE, min_prevalence = 0)
+if (has_lefser) rec_genus <- rec_genus %>% step_lefse()
+
+future::plan(multisession, workers = 6)
+da_results_genus <- prep(rec_genus, parallel = FALSE)
+results_genus <- bake(da_results_genus, count_cutoff = 2)
+cool(results_genus)
+
+# 4. Genus visualizations 
+
+# A) Save as Multi-page PDF
+pdf(file.path("DAR_Genus", "DAR_Genus_Plots.pdf"), width = 10, height = 8)
+exclusion_plt(da_results_genus)
+corr_heatmap(da_results_genus, font_size = 10)
+mutual_plt(da_results_genus, top_n = 24)
+dev.off()
+
+# B) Save as High-Res PNGs (Separate files)
+png(file.path("DAR_Genus", "DAR_Genus_Exclusion.png"), width = 2400, height = 1800, res = 300)
+exclusion_plt(da_results_genus)
+dev.off()
+
+png(file.path("DAR_Genus", "DAR_Genus_Heatmap.png"), width = 2400, height = 1800, res = 300)
+corr_heatmap(da_results_genus, font_size = 10)
+dev.off()
+
+png(file.path("DAR_Genus", "DAR_Genus_Mutual.png"), width = 3000, height = 2000, res = 300)
+mutual_plt(da_results_genus, top_n = 24)
+dev.off()
+
+# Save Main Outputs to DAR_Genus folder
+write.csv(cool(results_genus), file.path("DAR_Genus", "dar_consensus_genus_taxa.csv"), row.names = FALSE)
+save(da_results_genus, file = file.path("DAR_Genus", "dar_full_results_genus.RData"))
+export_steps(rec_genus, file.path("DAR_Genus", "dar_recipe_steps_genus.json"))
+
+# List the DA methods in results_genus
+method_names <- names(results_genus@results)
+
+# Prepare a list to store significant results by method
+signif_tables_genus <- list()
+
+# Loop over DA methods and extract significant genera
+for (method in method_names) {
+  df <- results_genus@results[[method]]$Predicted_Group
+  if ("signif" %in% names(df)) {
+    signif_df <- df[df$signif == TRUE, ]
+    if (nrow(signif_df) > 0) {
+      signif_tables_genus[[method]] <- signif_df
+    }
+  } else if ("padj" %in% names(df)) {
+    signif_df <- df[df$padj < 0.05, ]
+    if (nrow(signif_df) > 0) {
+      signif_tables_genus[[method]] <- signif_df
+    }
+  }
+}
+
+# Print out summary and write to DAR_Genus folder
+for (method in names(signif_tables_genus)) {
+  cat("\n=== Significant Genera for", method, "===\n")
+  print(signif_tables_genus[[method]])
+  
+  # Write file
+  outname <- file.path("DAR_Genus", paste0("significant_genera_", method, ".csv"))
+  write.csv(signif_tables_genus[[method]], outname, row.names = FALSE)
+}
+
+
+################################################################################
+## DAR CONSENSUS ANALYSIS AT SPECIES LEVEL
+################################################################################
+cat("\n=== START DAR CONSENSUS ANALYSIS: SPECIES LEVEL ===\n")
+
+# Create Output Directory for Species
+if (!dir.exists("DAR_Species")) {
+  dir.create("DAR_Species")
+}
+
+# 5. Species-level analysis (using same ps object)
+rec_species <- recipe(ps, "Predicted_Group", "Species") %>%
+  step_wilcox(rarefy = FALSE) %>%
+  step_aldex(rarefy = FALSE, mc.samples = 128) %>%
+  step_deseq(rarefy = FALSE) %>%
+  step_corncob(rarefy = FALSE, filter_discriminant = FALSE) %>%
+  step_metagenomeseq(rarefy = FALSE, rm_zeros = 0.01) %>%
+  step_maaslin(rarefy = FALSE, min_prevalence = 0)
+if (has_lefser) rec_species <- rec_species %>% step_lefse()
+
+future::plan(multisession, workers = 6)
+da_results_species <- prep(rec_species, parallel = FALSE)
+results_species <- bake(da_results_species, count_cutoff = 2)
+cool(results_species)
+
+# 6. Species visualizations 
+
+# A) Save as Multi-page PDF
+pdf(file.path("DAR_Species", "DAR_Species_Plots.pdf"), width = 10, height = 8)
+exclusion_plt(da_results_species)
+corr_heatmap(da_results_species, font_size = 10)
+mutual_plt(da_results_species, steps = steps_ids(rec_species, type = "da"), comparisons = NULL, count_cutoff = NULL, top_n = 6)
+dev.off()
+
+# B) Save as High-Res PNGs (Separate files)
+png(file.path("DAR_Species", "DAR_Species_Exclusion.png"), width = 2400, height = 1800, res = 300)
+exclusion_plt(da_results_species)
+dev.off()
+
+png(file.path("DAR_Species", "DAR_Species_Heatmap.png"), width = 2400, height = 1800, res = 300)
+corr_heatmap(da_results_species, font_size = 10)
+dev.off()
+
+png(file.path("DAR_Species", "DAR_Species_Mutual.png"), width = 3000, height = 2000, res = 300)
+mutual_plt(da_results_species, steps = steps_ids(rec_species, type = "da"), comparisons = NULL, count_cutoff = NULL, top_n = 6)
+dev.off()
+
+# Save Main Outputs to DAR_Species folder
+write.csv(cool(results_species), file.path("DAR_Species", "dar_consensus_species_taxa.csv"), row.names = FALSE)
+save(da_results_species, file = file.path("DAR_Species", "dar_full_results_species.RData"))
+export_steps(rec_species, file.path("DAR_Species", "dar_recipe_steps_species.json"))
+
+cat("\n=== DAR CONSENSUS ANALYSIS COMPLETE ===\n")
+
+# List the names of DA methods
+method_names <- names(results_species@results)
+
+# Create an empty list to store significant results by method
+signif_tables <- list()
+
+# Loop through each DA method
+for (method in method_names) {
+  df <- results_species@results[[method]]$Predicted_Group
+  # Try "signif" column (dar standard), or "padj" if not present
+  if ("signif" %in% names(df)) {
+    signif_df <- df[df$signif == TRUE, ]
+    if (nrow(signif_df) > 0) {
+      signif_tables[[method]] <- signif_df
+    }
+  } else if ("padj" %in% names(df)) {
+    signif_df <- df[df$padj < 0.05, ]
+    if (nrow(signif_df) > 0) {
+      signif_tables[[method]] <- signif_df
+    }
+  }
+}
+
+# Print a summary and write files to DAR_Species folder
+for (method in names(signif_tables)) {
+  cat("\n=== Significant Species for", method, "===\n")
+  print(signif_tables[[method]])
+  
+  outname <- file.path("DAR_Species", paste0("significant_species_", method, ".csv"))
+  write.csv(signif_tables[[method]], outname, row.names = FALSE)
+  
+}
+```
+
+
+
+# Reviewer-Requested Analyses
+
+All new analyses requested by Reviewers 1 and 2. Each section builds its
+own fresh data objects from `combinedcongo` to avoid any mutation issues
+from upstream classifier analyses.
+
+## Prepare features for caret analyses
+
+```{r reviewer-prep}
+set.seed(123)
+
+# Build fresh meco object from original phyloseq (never reuse meco_dataset)
+meco_rev <- phyloseq2meco(combinedcongo)
+meco_rev$tidy_dataset()
+meco_rev$tax_table <- base::subset(meco_rev$tax_table, Kingdom %in% c("k__Archaea", "k__Bacteria"))
+meco_rev$filter_pollution(taxa = c("mitochondria", "chloroplast"))
+st_rev <- subset(meco_rev$sample_table, Type == "sample")
+st_rev$BeforeMalaria <- as.character(st_rev$BeforeMalaria)
+st_rev$BeforeMalaria[is.na(st_rev$BeforeMalaria)] <- "Never"
+st_rev <- subset(st_rev, BeforeMalaria %in% c("Yes", "Never"))
+st_rev <- subset(st_rev, Time == "6W")
+st_rev$BeforeMalaria <- factor(st_rev$BeforeMalaria, levels = c("Yes", "Never"))
+meco_rev$sample_table <- st_rev
+meco_rev$tidy_dataset()
+
+# Use trans_classifier to get the EXACT same feature matrix the classifier uses
+cls_rev <- trans_classifier$new(
+  dataset = meco_rev, y.response = "BeforeMalaria", x.predictors = "Species"
+)
+features_full <- as.data.frame(cls_rev$data_feature)
+features_full[is.na(features_full)] <- 0
+
+# Outcome vector
+outcome <- factor(
+  meco_rev$sample_table[rownames(features_full), "BeforeMalaria"],
+  levels = c("Yes", "Never")
+)
+outcome <- relevel(outcome, ref = "Never")
+
+# Covariates
+risk_matched <- risk_df[match(
+  meco_rev$sample_table[rownames(features_full), "Individual"],
+  risk_df$Individual
+), ]
+
+st_cov <- meco_rev$sample_table[rownames(features_full), ]
+st_cov$bednet_binary <- ifelse(st_cov$X27_Bednet.y %in% c("Siku zote", "Busiku tu"), 1, 0)
+st_cov$antibiotic_6w <- as.numeric(as.character(st_cov$Med_Antibiotic))
+st_cov$antibiotic_6w[is.na(st_cov$antibiotic_6w)] <- 0
+st_cov$infant_sex_male <- ifelse(st_cov$Baby.sex.x == "M", 1, 0)
+st_cov$malaria_risk_score <- risk_matched$malaria_risk_score
+st_cov$malaria_risk_score[is.na(st_cov$malaria_risk_score)] <- median(risk_matched$malaria_risk_score, na.rm = TRUE)
+
+cat(sprintf("Features: %d samples x %d species\n", nrow(features_full), ncol(features_full)))
+cat(sprintf("Outcome levels: %s\n", paste(levels(outcome), collapse = ", ")))
+print(table(outcome))
+```
+
+## Repeated stratified cross-validation (10 x 5-fold)
+
+```{r reviewer-repeated-cv, cache=TRUE}
+set.seed(123)
+tc_rep <- caret::trainControl(method = "repeatedcv", number = 5, repeats = 10,
+                               classProbs = TRUE, summaryFunction = caret::twoClassSummary,
+                               savePredictions = "final")
+model_rep_cv <- caret::train(features_full, outcome, method = "knn", trControl = tc_rep,
+                              metric = "ROC", tuneGrid = expand.grid(k = c(3, 5, 7)))
+print(model_rep_cv)
+
+cv_res <- model_rep_cv$resample
+cat(sprintf("\nRepeated CV (50 folds): AUC = %.3f +/- %.3f\n", mean(cv_res$ROC), sd(cv_res$ROC)))
+cat(sprintf("  Sensitivity: %.3f +/- %.3f\n", mean(cv_res$Sens), sd(cv_res$Sens)))
+cat(sprintf("  Specificity: %.3f +/- %.3f\n", mean(cv_res$Spec), sd(cv_res$Spec)))
+```
+
+```{r reviewer-cv-plot, fig.width=8, fig.height=6, fig.cap="Repeated CV performance distribution."}
+cv_res %>% dplyr::select(ROC, Sens, Spec) %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = dplyr::recode(Metric, ROC = "AUC", Sens = "Sensitivity", Spec = "Specificity")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Metric)) +
+  geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.15, alpha = 0.3, size = 1.5) +
+  scale_fill_manual(values = c("#4393C3", "#D6604D", "#92C5DE")) +
+  ylim(0, 1) + theme_minimal(base_size = 14) + theme(legend.position = "none") +
+  labs(title = "Repeated 5-Fold CV (10 Repeats)", y = "Value", x = NULL)
+p_cv <- last_plot()
+save_fig(p_cv, "FigR_repeated_CV", width = 8, height = 6)
+```
+
+## Leave-one-out cross-validation
+
+```{r reviewer-loocv, cache=TRUE}
+set.seed(456)
+tc_loo <- caret::trainControl(method = "LOOCV", classProbs = TRUE,
+                               summaryFunction = caret::twoClassSummary,
+                               savePredictions = "final")
+model_loo <- caret::train(features_full, outcome, method = "knn", trControl = tc_loo,
+                           metric = "ROC", tuneGrid = expand.grid(k = c(3, 5, 7)))
+loocv_preds <- model_loo$pred %>% dplyr::filter(k == model_loo$bestTune$k)
+loocv_cm <- caret::confusionMatrix(loocv_preds$pred, loocv_preds$obs, positive = "Never")
+print(loocv_cm)
+```
+
+## Permutation testing (1,000 permutations)
+
+```{r reviewer-permutation, cache=TRUE}
+n_perm <- 1000
+best_k <- model_rep_cv$bestTune$k
+tc_perm <- caret::trainControl(method = "cv", number = 5, classProbs = TRUE,
+                                summaryFunction = caret::twoClassSummary)
+
+set.seed(789)
+obs_model <- caret::train(features_full, outcome, method = "knn", trControl = tc_perm,
+                           metric = "ROC", tuneGrid = data.frame(k = best_k))
+obs_auc <- max(obs_model$results$ROC)
+
+set.seed(101)
+null_aucs <- numeric(n_perm)
+pb <- txtProgressBar(min = 0, max = n_perm, style = 3)
+for (i in seq_len(n_perm)) {
+  pm <- tryCatch(caret::train(features_full, sample(outcome), method = "knn",
+                               trControl = tc_perm, metric = "ROC",
+                               tuneGrid = data.frame(k = best_k)),
+                  error = function(e) NULL)
+  null_aucs[i] <- if (!is.null(pm)) max(pm$results$ROC) else NA
+  setTxtProgressBar(pb, i)
+}
+close(pb)
+null_aucs <- null_aucs[!is.na(null_aucs)]
+perm_p <- (sum(null_aucs >= obs_auc) + 1) / (length(null_aucs) + 1)
+
+cat(sprintf("\nObserved AUC: %.3f\nNull AUC: %.3f +/- %.3f\nPermutation p = %.4f\n",
+            obs_auc, mean(null_aucs), sd(null_aucs), perm_p))
+```
+
+```{r reviewer-perm-plot, fig.width=8, fig.height=6, fig.cap="Permutation null distribution."}
+ggplot(data.frame(AUC = null_aucs), aes(x = AUC)) +
+  geom_histogram(bins = 50, fill = "grey70", color = "grey40") +
+  geom_vline(xintercept = obs_auc, color = "red", linetype = "dashed", linewidth = 1.2) +
+  annotate("text", x = obs_auc + 0.02, y = Inf, vjust = 2, hjust = 0,
+           label = sprintf("Observed = %.3f\np = %.4f", obs_auc, perm_p), color = "red") +
+  labs(title = "Permutation Test", x = "AUC (5-fold CV)", y = "Count") +
+  theme_minimal(base_size = 14)
+p_perm <- last_plot()
+save_fig(p_perm, "FigR_permutation_test", width = 8, height = 6)
+```
+
+## Sensitivity analyses (covariates)
+
+```{r reviewer-sensitivity, cache=TRUE}
+set.seed(202)
+knn_grid <- data.frame(k = best_k)
+tc_sens <- caret::trainControl(method = "repeatedcv", number = 5, repeats = 10,
+                                classProbs = TRUE, summaryFunction = caret::twoClassSummary)
+
+feat_A <- features_full
+feat_B <- cbind(features_full, bednet = st_cov$bednet_binary)
+feat_C <- cbind(features_full, bednet = st_cov$bednet_binary,
+                 abx = st_cov$antibiotic_6w, sex = st_cov$infant_sex_male)
+feat_D <- cbind(feat_C, risk_score = st_cov$malaria_risk_score)
+
+mods <- list(
+  "A: Microbiome only"  = caret::train(feat_A, outcome, method = "knn", trControl = tc_sens, metric = "ROC", tuneGrid = knn_grid),
+  "B: + Bednet"         = caret::train(feat_B, outcome, method = "knn", trControl = tc_sens, metric = "ROC", tuneGrid = knn_grid),
+  "C: + Bednet/Abx/Sex" = caret::train(feat_C, outcome, method = "knn", trControl = tc_sens, metric = "ROC", tuneGrid = knn_grid),
+  "D: + All covariates" = caret::train(feat_D, outcome, method = "knn", trControl = tc_sens, metric = "ROC", tuneGrid = knn_grid)
+)
+# NOTE: preProcess not applied. All models use unscaled features for
+# consistency with the original k-NN classifier. The sensitivity analysis
+# tests the *relative* impact of adding covariates to the same model
+# framework, not absolute performance.
+
+sens_results <- do.call(rbind, lapply(names(mods), function(nm) {
+  r <- mods[[nm]]$resample
+  data.frame(Model = nm, AUC = mean(r$ROC), AUC_SD = sd(r$ROC),
+             Sens = mean(r$Sens), Spec = mean(r$Spec))
+}))
+print(sens_results)
+
+# Paired comparisons
+cat("\n=== Paired t-tests vs. Base Model (A) ===\n")
+auc_A <- mods[["A: Microbiome only"]]$resample$ROC
+for (nm in names(mods)[-1]) {
+  tt <- t.test(auc_A, mods[[nm]]$resample$ROC, paired = TRUE)
+  cat(sprintf("  A vs %s: diff = %+.3f, p = %.4f\n", nm, mean(auc_A - mods[[nm]]$resample$ROC), tt$p.value))
+}
+```
+
+## Post-hoc power analysis
+
+```{r reviewer-power, fig.width=8, fig.height=6, fig.cap="Power curve for two-sample comparison."}
+n_r <- sum(outcome == "Never"); n_s <- sum(outcome == "Yes")
+det_d <- pwr.t2n.test(n1 = n_r, n2 = n_s, power = 0.80, sig.level = 0.05)$d
+cat(sprintf("Min detectable effect at 80%% power: d = %.2f (n = %d vs %d)\n", det_d, n_r, n_s))
+
+d_seq <- seq(0.3, 1.8, 0.1)
+pow <- sapply(d_seq, function(d) pwr.t2n.test(n1 = n_r, n2 = n_s, d = d, sig.level = 0.05)$power)
+ggplot(data.frame(d = d_seq, power = pow), aes(d, power)) +
+  geom_line(linewidth = 1.2, color = "#2166AC") + geom_point(color = "#2166AC") +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  geom_vline(xintercept = det_d, linetype = "dotted", color = "#B2182B") +
+  labs(title = "Post-Hoc Power Analysis", x = "Cohen's d", y = "Power") +
+  theme_minimal(base_size = 14)
+p_power <- last_plot()
+save_fig(p_power, "FigR_power_analysis", width = 8, height = 6)
+```
+
+## Covariate summary table
+
+```{r reviewer-covariate-table}
+data.frame(
+  Analysis = c("LDA (LEfSe)", "ANCOM-BC", "ANCOM-BC (bednet-adjusted)", "DAR", "Digital PCR",
+               "k-NN Classifier (original)", "k-NN + Covariates (sensitivity)"),
+  Infant_Sex = c("No", "Yes", "Yes", "No", "No", "No", "Yes (C,D)"),
+  Antibiotics = c("No", "Yes", "Yes", "No", "No", "No", "Yes (C,D)"),
+  Bednet_6W = c("No", "No", "Yes", "No", "No", "No", "Yes (B,C,D)"),
+  Risk_Score = c("No", "No", "No", "No", "No", "No", "Yes (D)"),
+  Breastfeeding = rep("No*", 7),
+  check.names = FALSE
+) %>%
+  kable(caption = "Covariates by analysis. *94-100% exclusively breastfed at 6W.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+
+
+# Interpretive Results Summary
+
+## Original analyses
+
+The classifier pipeline tested 72 model configurations across six taxonomic levels and six algorithms. The best-performing model was **species-level k-NN with Boruta feature selection**:
+
+- 90.0% balanced accuracy (5-fold CV on 75% training set), 91.7% overall accuracy
+- 100% sensitivity, 80.0% specificity, 87.5% precision, 93.3% F1
+- **6 features selected by Boruta** from the 144 species-level features
+
+The held-out test set (n = 12) classified 9/12 correctly (75% accuracy, 95% CI: 43--95%, kappa = 0.50, p = 0.19). The wide CI is expected given the small test set.
+
+Top features by composite importance: *S. salivarius* (10.37), *R. mucilaginosa* (9.66), *C. aerofaciens* (8.96), *K. pneumoniae* (8.87), *E. lenta* (6.97) were associated with susceptibility; *C. avidum* (5.29), *B. breve* (4.95), *M. micronuciformis* (4.68) were associated with resistance.
+
+DAR consensus analysis identified 5 genera (*Bifidobacterium*, *Streptococcus*, *Lacticaseibacillus*, *Lactobacillus*, *Megasphaera*) and 6 species as significant by $\geq$2 methods.
+
+The first-year classifier achieved 66.6% balanced accuracy during CV but failed on the test set (kappa = 0), likely because rapid microbiome restructuring over the first year obscures early malaria-associated signals.
+
+## Reviewer-requested validation
+
+### More rigorous cross-validation
+
+Repeated stratified CV (10 $\times$ 5-fold, k-NN on 144 species, best k = 7) yielded AUC = 0.642 $\pm$ 0.204, sensitivity = 0.744 $\pm$ 0.195, and specificity = 0.518 $\pm$ 0.282.
+
+LOOCV gave balanced accuracy = 62.0%, sensitivity = 59.3%, specificity = 64.7%, kappa = 0.227, overall accuracy = 61.4% (95% CI: 45.5--75.6%).
+
+These are substantially lower than the 90% balanced accuracy from the original single 75/25 split, which is expected --- a single favorable split can yield optimistic estimates. The repeated CV and LOOCV results are more representative of true out-of-sample performance and point to a real but modest microbiome signal.
+
+### Permutation testing
+
+1,000 permutations of outcome labels produced an observed AUC of 0.543 against a null of 0.495 $\pm$ 0.108, yielding p = 0.312. The model does not significantly outperform chance by this metric alone. Given the small sample size, this is not surprising --- the study is underpowered for permutation-based significance testing. Importantly, the biological associations identified by LDA, ANCOM-BC, DAR, and digital PCR are independent of the classifier and not affected by this result.
+
+### Sensitivity analyses: covariates
+
+| Model | AUC (mean $\pm$ SD) | p vs. A |
+|---|---|---|
+| A: Microbiome only | 0.607 $\pm$ 0.193 | --- |
+| B: + Bednet | 0.787 $\pm$ 0.118 | **< 0.0001** |
+| C: + Bednet/Abx/Sex | 0.686 $\pm$ 0.141 | 0.022 |
+| D: + All covariates | 0.584 $\pm$ 0.187 | 0.571 |
+
+Adding bednet use at six weeks substantially improved classification (AUC from 0.607 to 0.787, p < 0.0001), which is consistent with the significant group difference in bednet use at this timepoint (39% vs. 78%, P = .0127). Bednet use is clearly an important covariate here. The drop in Model D relative to B likely reflects overfitting from adding too many features for n = 44.
+
+These results suggest the microbiome signal and bednet use are partially intertwined. The microbiome-only model yielded AUC 0.607, though the permutation test did not reach significance (p = 0.312), and bednet use captures additional variance. Disentangling these effects will require larger cohorts.
+
+### Power analysis
+
+With n = 27 vs. 17, the minimum detectable effect at 80% power is Cohen's d = 0.89. Only large effects are detectable at this sample size. The significant Bifidobacterium dPCR result (p = 0.0008) likely reflects a genuinely large effect, while subtler associations may be missed. The test set CI of 43--95% at n = 12 reinforces why repeated CV and LOOCV are more informative than a single held-out split.
+
+## Summary
+
+The 90% balanced accuracy from the original train/test split was optimistic. More rigorous resampling gives AUC ~0.64 and balanced accuracy ~62% --- a real but modest signal, consistent with the small cohort size. The permutation test is non-significant, reflecting limited power rather than absence of signal.
+
+The differential abundance results are the strongest part of the analysis. Multiple independent methods converge on the same taxa: *Bifidobacterium*, *Lactobacillus*, *Megasphaera* with resistance; *Streptococcus*, *Klebsiella* with susceptibility. These are supported by dPCR confirmation (p = 0.0008 for Bifidobacterium).
+
+Bednet use at six weeks is a significant confounder and co-predictor. The microbiome-only classifier yielded AUC 0.607, while adding bednet increased AUC to 0.787 (p < 0.0001). This is consistent with what we already report in Table 2 (bednet difference P = .0127) and the malaria risk score analysis.
+
+Importantly, the bednet-adjusted ANCOM-BC analysis (adding `X27_Bednet.y` to the model formula) retained 11 significant taxa at 6 weeks, indicating that the differential abundance results are robust to adjustment for bednet use.
+
+The revised framing should present these findings as exploratory and hypothesis-generating, with the classifier results providing preliminary evidence of predictive capacity that requires validation in larger, independent cohorts.
+
+
+# Session Info
+
+```{r session-info, cache=FALSE}
+sessionInfo()
+```

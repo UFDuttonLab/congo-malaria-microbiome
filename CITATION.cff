@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+title: "Analysis pipeline for 'Gut Microbiome in Infancy Predicts Malaria Susceptibility'"
+message: "If you use this pipeline, please cite the Zenodo archive (DOI below) and the associated manuscript."
+type: software
+authors:
+  - family-names: Dutton
+    given-names: Christopher L.
+    affiliation: University of Florida
+  - family-names: Follis
+    given-names: Madison
+    affiliation: University of Florida
+  - family-names: Munaweera
+    given-names: Jenny
+    affiliation: University of Florida
+  - family-names: Maisha
+    given-names: Felicien Masanga
+    affiliation: "HEAL Africa Hospital, Democratic Republic of Congo"
+  - family-names: Mulligan
+    given-names: Connie J.
+    affiliation: University of Florida
+  - family-names: Moore
+    given-names: Julie M.
+    affiliation: University of Florida
+keywords:
+  - microbiome
+  - 16S rRNA
+  - malaria
+  - PacBio
+  - DADA2
+  - phyloseq
+  - reproducibility
+license: MIT
+repository-code: "https://github.com/REPLACE_WITH_YOUR_USERNAME/REPLACE_WITH_REPO_NAME"
