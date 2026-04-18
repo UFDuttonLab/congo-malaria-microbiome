@@ -1,0 +1,351 @@
+---
+title: "Congo Maternal Stress Infant Gut Microbiome QC"
+author: "Christopher Dutton"
+date: "Last compiled on `r Sys.Date()`"
+output: 
+  html_document:
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+  
+---
+
+This file starts with the fastq files from the PACBIO run and runs through the dada2 workflow to get a phyloseq object at the end. Two cells were used with all samples ran once on each cell. Fastq files from the different cells are them combined after error learning for the individual runs. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## 100gb ram and 12 cores on hipergator
+```
+
+```{r warning=FALSE, message=FALSE}
+## https://benjjneb.github.io/LRASManuscript/LRASms_fecal.html
+
+library(dada2)
+library(Biostrings)
+library(ShortRead)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(phyloseq)
+library(gtools)
+
+```
+
+# Cell 1
+
+```{r warning=FALSE, message=FALSE}
+## path1 <- "/blue/mulligan/duttonc/Congo/Cell1" 
+path1 <- "C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell1" 
+
+fns1 <- list.files(path1, pattern="fastq", full.names=TRUE)
+F27 <- "AGRGTTYGATYMTGGCTCAG"
+R1492 <- "RGYTACCTTGTTACGACTT"
+rc <- dada2:::rc
+theme_set(theme_bw())
+
+```
+
+```{r warning=FALSE, message=FALSE}
+
+if (file.exists("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell1/cell1_output.Rdata")){
+  load("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell1/cell1_output.Rdata")
+} else{}
+
+## remove primers
+nops1 <- file.path(path1, "noprimers", basename(fns1))
+if (exists("prim1")){
+  print("cached file loaded: prim1")
+} else{
+  prim1 <- removePrimers(fns1, nops1, primer.fwd=F27, primer.rev=dada2:::rc(R1492), orient=TRUE)
+}
+
+## filter
+if (exists("lens.fn1")){
+    print("cached file loaded: lens.fn1")
+  } else{
+  lens.fn1 <- lapply(nops1, function(fn) nchar(getSequences(fn)))
+}
+
+lens <- do.call(c, lens.fn1)
+hist(lens, 1000)
+
+filts1 <- file.path(path1, "noprimers", "filtered", basename(fns1))
+
+if (exists("track1")){
+  print("cached file loaded: track1")
+} else{
+  track1 <- filterAndTrim(nops1, filts1, minQ=3, minLen=1000, maxLen=1600, maxN=0, rm.phix=FALSE, maxEE=2)
+}
+
+track1
+
+## dada2
+if (exists("drp1")){
+  print("cached file loaded: drp1")
+} else{
+  drp1 <- derepFastq(filts1, verbose=TRUE)
+}
+
+
+## Learn errors
+if (exists("err1")){
+  print("cached file loaded: err1")
+} else{
+  err1 <- learnErrors(drp1, errorEstimationFunction=PacBioErrfun, BAND_SIZE=32, multithread=TRUE)
+}
+
+## Plot errors
+plotErrors(err1)
+
+## Denoise
+
+if (exists("dd1")){
+  print("cached file loaded: dd1")
+} else{
+  dd1 <- dada(drp1, err=err1, BAND_SIZE=32, multithread=TRUE)
+}
+
+cbind(ccs=prim1[,1], primers=prim1[,2], filtered=track1[,2], denoised=sapply(dd1, function(x) sum(x$denoised)))
+
+## Sequence table
+
+if (exists("st1")){
+  print("cached file loaded: st1")
+} else{
+  st1 <- makeSequenceTable(dd1); dim(st1)
+  
+  save(lens.fn1, dd1, drp1, err1, prim1, track1, st1, file="C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell1/cell1_output.Rdata")
+}
+
+```
+
+# Cell 2
+
+```{r warning=FALSE, message=FALSE}
+
+## CELL 2
+if (file.exists("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell2/cell2_output.Rdata")){
+  load("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell2/cell2_output.Rdata")
+} else{}
+
+##path2 <- "/blue/mulligan/duttonc/Congo/Cell2"
+path2 <- "C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell2" 
+
+fns2 <- list.files(path2, pattern="fastq", full.names=TRUE)
+
+## remove primers
+nops2 <- file.path(path2, "noprimers", basename(fns2))
+if (exists("prim2")){
+  print("cached file loaded: prim2")
+} else{
+  prim2 <- removePrimers(fns2, nops2, primer.fwd=F27, primer.rev=dada2:::rc(R1492), orient=TRUE)
+}
+
+## filter
+if (exists("lens.fn2")){
+  print("cached file loaded: lens.fn2")
+} else{
+  lens.fn2 <- lapply(nops2, function(fn) nchar(getSequences(fn)))
+}
+
+lens <- do.call(c, lens.fn2)
+hist(lens, 1000)
+
+filts2 <- file.path(path2, "noprimers", "filtered", basename(fns2))
+
+if (exists("track2")){
+  print("cached file loaded: track2")
+} else{
+  track2 <- filterAndTrim(nops2, filts2, minQ=3, minLen=1000, maxLen=1600, maxN=0, rm.phix=FALSE, maxEE=2)
+}
+
+track2
+
+## dada2
+if (exists("drp2")){
+  print("cached file loaded: drp2")
+} else{
+  drp2 <- derepFastq(filts2, verbose=TRUE)
+}
+
+## Learn errors
+if (exists("err2")){
+  print("cached file loaded: err2")
+} else{
+  err2 <- learnErrors(drp2, errorEstimationFunction=PacBioErrfun, BAND_SIZE=32, multithread=TRUE)
+}
+
+## Plot errors
+plotErrors(err2)
+
+## Denoise
+if (exists("dd2")){
+  print("cached file loaded: dd2")
+} else{
+  dd2 <- dada(drp2, err=err2, BAND_SIZE=32, multithread=TRUE)
+}
+
+cbind(ccs=prim2[,1], primers=prim2[,2], filtered=track2[,2], denoised=sapply(dd2, function(x) sum(x$denoised)))
+
+## Sequence table
+if (exists("st2")){
+  print("cached file loaded: st2")
+} else{
+  st2 <- makeSequenceTable(dd2); dim(st2)
+  
+    save(lens.fn2, dd2, drp2, err2, prim2, track2, st2, file="C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/Cell2/cell2_output.Rdata")
+}
+```
+
+# Combine sequence tables
+
+```{r warning=FALSE, message=FALSE}
+
+## due to error made at sequencing facility, need to change the name of one of the samples in each sequence table
+rownames(st1) <- gsub("G13_3M_2", "G37_3M", rownames(st1))
+rownames(st2) <- gsub("G13_3M_2", "G37_3M", rownames(st2))
+
+## mislabeled sample from during collection
+rownames(st1) <- gsub("G7_MV2", "G7_MV1", rownames(st1))
+rownames(st2) <- gsub("G7_MV2", "G7_MV1", rownames(st2))
+
+## combine the two sequence tables together by summing them. 
+stcomb <- mergeSequenceTables(st1, st2, repeats="sum")
+
+## check rownames, should still be 120 samples
+rownames(stcomb)
+
+```
+
+# Assign Taxonomy
+
+```{r warning=FALSE, message=FALSE}
+## Assign taxonomy, download appropriate reference database from here - https://benjjneb.github.io/dada2/training.html
+
+## Please note, assignTaxonomy with the species training set is recommended over the other options.
+## https://github.com/benjjneb/dada2/issues/1319#issuecomment-820659005
+
+## Combine
+if (file.exists("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/cellcombined_output.Rdata")){
+  load("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/cellcombined_output.Rdata")
+} else{}
+
+if (exists("tax")){
+  print("cached file loaded: tax")
+} else{
+  tax <- assignTaxonomy(stcomb, "C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/silva_nr99_v138.1_wSpecies_train_set.fa.gz", multithread=TRUE) # Slowest part
+  tax[,"Genus"] <- gsub("Escherichia-Shigella", "Escherichia", tax[,"Genus"]) # Reformat to be compatible with other data sources
+}
+
+head(unname(tax))
+
+if (exists("bim")){
+  print("cached file loaded: bim")
+} else{
+  bim <- isBimeraDenovo(stcomb, minFoldParentOverAbundance=3.5, multithread=FALSE)
+
+}
+```
+
+What proportion are chimeras?
+
+```{r warning=FALSE, message=FALSE}
+## Check Chimeras
+if (file.exists("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/cellcombined_output.Rdata")){
+  load("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/cellcombined_output.Rdata")
+} else{
+
+  bim <- isBimeraDenovo(stcomb, minFoldParentOverAbundance=3.5, multithread=FALSE)
+
+}
+
+table(bim)
+sum(stcomb[,bim])/sum(stcomb)
+
+## Extract Sample Names
+sample.names <- sapply(strsplit(fns2, "Cell2/"), function(x) paste(x[2]))
+sample.names <- sapply(strsplit(sample.names, "-"), function(x) paste(x[1]))
+rownames(stcomb) <- sample.names
+sample.names
+
+## remove chimeras
+if (exists("seqtab")){
+  print("cached file loaded: seqtab")
+} else{
+  seqtab <- removeBimeraDenovo(stcomb, method="consensus", multithread=FALSE)
+  
+  save(bim, seqtab, tax, file=("C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/cellcombined_output.Rdata"))
+}
+
+```
+
+```{r warning=FALSE, message=FALSE}
+
+## construct the phyloseq object 
+
+## import sample data
+sample_data <- read.csv(file="C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/CombinedMetadata_v8.csv", header=TRUE, sep=",")
+rownames(sample_data) <- sample_data$sampleId
+
+otuforsamples <- otu_table(seqtab, taxa_are_rows = FALSE)
+
+sample_names(otuforsamples) <- paste(sample_names(otuforsamples), "_2", sep="")
+
+dataforsamples<-sample_data(sample_data)
+
+psCongo2 <- phyloseq(otuforsamples, dataforsamples, tax_table(tax))
+
+saveRDS(psCongo2, "C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/psCongo2_V3.rds") 
+
+psCongo2
+
+```
+
+Import the first round Phyloseq Object and combine it with the new object to conduct analyses over the full year time period.
+
+```{r}
+
+metadata <- read.csv(file="CombinedMetadata_V8.csv", header = TRUE, sep=",")
+
+# ## fix names, append with _2
+# testdf <- sample_data(psCongo2)
+# testdf$newname <- paste(testdf$sampleId, "_2", sep="")
+# sample_names(psCongo2) <- testdf$newname
+# psCongo2
+
+psCongo_V4 <- readRDS("psCongo_V4.rds") ## this is the first round phyloseq object
+
+## need to correct a naming error from this original object
+sample_names(psCongo_V4)[sample_names(psCongo_V4) == "G7_MV2"] <- "G7_MV1"
+
+psCongo_V4
+
+sampletable <- sample_data(metadata)
+
+rownames(sampletable) <- sampletable$sampleId
+
+pscongotax <- tax_table(psCongo_V4)
+pscongootu <- otu_table(psCongo_V4)
+
+psCongo1 <- phyloseq(pscongootu, sampletable, pscongotax)
+
+psCongo1
+psCongo2
+
+combinedcongo <- merge_phyloseq(psCongo2, psCongo1)
+combinedcongo
+
+saveRDS(combinedcongo, "C:/Users/cldut/OneDrive - University of Florida/Dutton_Lab/Congo/SecondRound/psCombinedCongo_V5.rds") 
+
+```
+
+
+```{r}
+sessionInfo()
+
+```
+
