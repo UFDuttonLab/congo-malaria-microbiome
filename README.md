@@ -8,30 +8,29 @@ This repository contains the full analytical chain — from raw PacBio reads to 
 ---
 
 ## Repository structure
-congo-malaria-microbiome/
-├── 01_sequence_processing/   Raw FASTQ → phyloseq object (DADA2 workflow)
-│   ├── Congo_InfantGut_2ndRound_QC.Rmd
-│   └── Congo_InfantGut_2ndRound_QC.html
-├── 02_analysis/               phyloseq object → manuscript figures and stats
-│   ├── Congo_Malaria_Rev1.Rmd
-│   ├── Congo_Malaria_Rev1.html
-│   └── Congo_Malaria_Rev1_files/   (supporting images for the HTML)
-├── renv/                      Project-local package cache
-├── renv.lock                  Exact package versions used for the analysis
-├── .Rprofile                  Activates renv on R session start
-├── .zenodo.json               Zenodo metadata for automatic DOI minting
-├── CITATION.cff               Citation metadata for GitHub
-├── LICENSE                    MIT license
-└── README.md                  This file
----
+
+- **01_sequence_processing/** — Raw FASTQ → phyloseq object (DADA2 workflow)
+  - `Congo_InfantGut_2ndRound_QC.Rmd`
+  - `Congo_InfantGut_2ndRound_QC.html`
+- **02_analysis/** — phyloseq object → manuscript figures and stats
+  - `Congo_Malaria_Rev1.Rmd`
+  - `Congo_Malaria_Rev1.html`
+  - `Congo_Malaria_Rev1_files/` (supporting images for the HTML)
+- **renv/** — Project-local package cache
+- `renv.lock` — Exact package versions used for the analysis
+- `.Rprofile` — Activates renv on R session start
+- `.zenodo.json` — Zenodo metadata for automatic DOI minting
+- `CITATION.cff` — Citation metadata for GitHub
+- `LICENSE` — MIT license
+- `README.md` — This file
 
 ---
 
 ## Pipeline overview
 
-The pipeline runs in two sequential stages:
+The pipeline runs in two sequential stages.
 
-### Stage 1: Sequence processing (`01_sequence_processing/`)
+### Stage 1: Sequence processing (01_sequence_processing/)
 
 `Congo_InfantGut_2ndRound_QC.Rmd` takes raw PacBio circular consensus sequencing (CCS) FASTQ files from two SMRT cells and runs the DADA2 workflow end-to-end:
 
@@ -48,7 +47,7 @@ This stage was run on the HiPerGator cluster at the University of Florida (100 G
 
 The compiled HTML provides a full record of the original run, including read counts at each filtering step, error profiles, and chimera statistics.
 
-### Stage 2: Analysis (`02_analysis/`)
+### Stage 2: Analysis (02_analysis/)
 
 `Congo_Malaria_Rev1.Rmd` takes the phyloseq object from Stage 1 (plus the malaria risk score CSV) and reproduces every figure, table, and statistical result in the manuscript:
 
@@ -61,11 +60,11 @@ The compiled HTML provides a full record of the original run, including read cou
 | Figure 6 (A–D) | Beta and alpha diversity before/during/post malaria |
 | Figure S1 | Alpha diversity by timepoint |
 | Figure S2 (A–D) | ANCOM-BC heatmaps at each timepoint |
-| Classifier (6W) | 72-model grid search, best model selection (species-level k-NN + Boruta, 90.0% balanced accuracy), feature importance |
+| Classifier (6W) | 72-model grid search, best model (species-level k-NN + Boruta, 90.0% balanced accuracy), feature importance |
 | Classifier (1Y) | Parallel analysis at one year |
-| Reviewer validation | Repeated stratified CV (10 × 5-fold), LOOCV, permutation testing (1,000 permutations), sensitivity covariate models (A–D), post-hoc power analysis, covariate inclusion summary |
+| Reviewer validation | Repeated stratified CV (10 × 5-fold), LOOCV, permutation testing (1,000 permutations), sensitivity covariate models, post-hoc power analysis, covariate inclusion summary |
 
-This stage is fully reproducible via `renv`.
+This stage is fully reproducible via renv.
 
 ---
 
@@ -81,31 +80,23 @@ This stage is fully reproducible via `renv`.
 
 ### Prerequisites
 
-- **R** ≥ 4.3
-- **Pandoc** ≥ 2.0 (bundled with recent RStudio installations)
-- System libraries for Bioconductor packages: on Debian/Ubuntu, `sudo apt-get install libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev`. Usually already present on macOS and Windows.
+- R ≥ 4.3
+- Pandoc ≥ 2.0 (bundled with recent RStudio installations)
+- System libraries for Bioconductor packages: on Debian/Ubuntu, install `libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev`. Usually already present on macOS and Windows.
 
 ### Quick start
 
-1. **Clone this repository** or download a release tarball from the "Releases" page on GitHub.
+1. Clone this repository or download a release tarball from the Releases page on GitHub.
 
-2. **Download the data files** from Zenodo: https://doi.org/10.5281/zenodo.19634458. Place both files in the `02_analysis/` folder:
+2. Download the data files from Zenodo at https://doi.org/10.5281/zenodo.19634458. Place both files in the `02_analysis/` folder:
    - `psCombinedCongo_V5.rds`
    - `working_malaria_risk_score.csv`
 
-3. **Open R** in the `02_analysis/` folder (in RStudio, open the `.Rmd` directly — RStudio sets the working directory automatically).
+3. Open R in the `02_analysis/` folder (in RStudio, open the Rmd directly — RStudio sets the working directory automatically).
 
-4. **Restore the package environment**:
-```r
-   install.packages("renv")   # if not already installed
-   renv::restore()
-```
-   This installs every package at the exact version used to produce the submitted results. First-time restoration typically takes 20–60 minutes.
+4. Restore the package environment by running `install.packages("renv")` if needed, then `renv::restore()`. This installs every package at the exact version used to produce the submitted results. First-time restoration typically takes 20–60 minutes.
 
-5. **Knit the Rmd**. In RStudio, click Knit. From the command line:
-```bash
-   Rscript -e 'rmarkdown::render("Congo_Malaria_Rev1.Rmd")'
-```
+5. Knit the Rmd. In RStudio, click Knit. From the command line, run `Rscript -e 'rmarkdown::render("Congo_Malaria_Rev1.Rmd")'`.
 
 A successful knit produces `Congo_Malaria_Rev1.html` with all figures rendered inline, and populates `figures/`, `SixWeek/`, `SixWeekResults/`, and `FirstYear/` subdirectories with the PNG and PDF files used in the manuscript.
 
@@ -158,4 +149,3 @@ If you use this pipeline, please cite both the code archive and the associated m
 
 **Julie M. Moore** — juliemmoore@ufl.edu
 Department of Infectious Diseases and Immunology, University of Florida
-
