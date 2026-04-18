@@ -1,6 +1,6 @@
 {
   "title": "Analysis pipeline for 'Gut Microbiome in Infancy Predicts Malaria Susceptibility'",
-  "description": "<p>R Markdown pipeline reproducing all figures, tables, and statistical results for the manuscript Dutton et al., 'Gut Microbiome in Infancy Predicts Malaria Susceptibility' (Frontiers in Microbiology, 2026).</p><p>Inputs are full-length 16S rRNA PacBio CCS reads (raw reads archived at NCBI SRA) processed through DADA2, packaged as a phyloseq object. The pipeline reproduces all main and supplemental figures, classifier analyses (k-NN with Boruta feature selection, 72-model grid search, repeated cross-validation, LOOCV, permutation testing, sensitivity covariate models), ANCOM-BC differential abundance (including bednet-adjusted sensitivity), DAR multi-method consensus, LEfSe, and SplinectomeR longitudinal analyses.</p><p>Exact package versions are pinned via renv.lock. Restore the environment with renv::restore() and knit Congo_Malaria_Rev1.Rmd.</p>",
+  "description": "<p>R Markdown pipeline reproducing all figures, tables, and statistical results for the manuscript Dutton et al., 'Gut Microbiome in Infancy Predicts Malaria Susceptibility,' currently under review at Frontiers in Microbiology.</p><p>Inputs are full-length 16S rRNA PacBio CCS reads (raw reads archived at NCBI SRA) processed through DADA2, packaged as a phyloseq object. The pipeline reproduces all main and supplemental figures, classifier analyses (k-NN with Boruta feature selection, 72-model grid search, repeated cross-validation, LOOCV, permutation testing, sensitivity covariate models), ANCOM-BC differential abundance (including bednet-adjusted sensitivity), DAR multi-method consensus, LEfSe, and SplinectomeR longitudinal analyses.</p><p>Exact package versions are pinned via renv.lock. Restore the environment with renv::restore() and knit Congo_Malaria_Rev1.Rmd.</p>",
   "upload_type": "software",
   "creators": [
     {
@@ -44,9 +44,9 @@
   "access_right": "open",
   "related_identifiers": [
     {
-      "relation": "isSupplementTo",
-      "identifier": "TO_BE_UPDATED_WITH_FRONTIERS_DOI",
-      "resource_type": "publication-article"
+      "relation": "isSupplementedBy",
+      "identifier": "10.5281/zenodo.19634458",
+      "resource_type": "dataset"
     }
   ],
   "communities": []
